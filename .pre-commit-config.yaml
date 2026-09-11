@@ -1,0 +1,29 @@
+# Install once per clone: `pre-commit install`
+#
+# The cheap subset of `cargo verify`, with one deliberate difference: the fmt
+# hook *fixes* formatting rather than checking it, because a hook is the one
+# place where rewriting the file beats reporting on it. The commit still fails,
+# so the reformatted files have to be restaged and the commit reattempted --
+# the diff you push should be the diff you looked at.
+#
+# Clippy goes through xtask so the hook and CI run the identical lane
+# definition. Everything heavier stays an explicit `cargo verify` before a
+# push: a hook slow enough to be bypassed with `--no-verify` protects nothing.
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all
+        language: system
+        # Not `types: [rust]`: a manifest- or lockfile-only change is exactly
+        # the kind that breaks clippy, and it would skip both hooks.
+        types_or: [rust, toml]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo verify --only clippy
+        entry: cargo verify --only clippy
+        language: system
+        types_or: [rust, toml]
+        pass_filenames: false

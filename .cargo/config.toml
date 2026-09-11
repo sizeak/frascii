@@ -1,0 +1,18 @@
+# `cargo verify` is the one command to remember. It is an alias for the xtask
+# crate, a normal workspace member -- so the task runner is Rust, built by cargo
+# and tested by `cargo test`. No shell script, no Makefile, nothing to install.
+#
+#   cargo verify              every lane: fmt, clippy, build, test, doc
+#   cargo verify --only doc   one lane (each CI job runs exactly this)
+#   cargo verify --list       the lane / exit-code table
+#   cargo verify --help       full usage
+#
+# The default is deliberately the *whole* set, matching CI's matrix: a default
+# that skipped a lane would mean a green `cargo verify` did not imply a green
+# PR, which is the only thing this tool is for. A test asserts the two agree.
+#
+# `cargo xtask` is the same binary under its conventional name, for anyone who
+# reaches for that spelling first.
+[alias]
+verify = "run --quiet --package xtask --"
+xtask = "run --quiet --package xtask --"

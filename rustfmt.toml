@@ -1,0 +1,7 @@
+# Stable options only, so `cargo fmt` behaves the same on a stable toolchain as
+# it does in CI. Anything nightly-gated (imports_granularity, group_imports)
+# would silently no-op on stable and let two contributors format the same file
+# two ways.
+edition = "2024"
+use_field_init_shorthand = true
+use_try_shorthand = true

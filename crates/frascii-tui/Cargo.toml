@@ -1,0 +1,28 @@
+[package]
+name = "frascii-tui"
+description = "The ratatui terminal frontend for frascii"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# Note there is no direct `crossterm` dependency, and adding one would be a
+# mistake rather than a tidy-up. ratatui re-exports the exact crossterm it was
+# built against as `ratatui::crossterm`; a separate entry here resolves
+# independently, so a semver-incompatible bump on either side compiles two
+# crossterms into one binary and the key events this crate reads come from a
+# different type than the terminal it initialised. Always reach through the
+# re-export.
+[dependencies]
+frascii-core.workspace = true
+ratatui.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+
+[lints]
+workspace = true

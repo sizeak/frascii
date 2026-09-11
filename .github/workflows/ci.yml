@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Superseding a pull request cancels its in-flight run: pushing twice in quick
+# succession would otherwise run two full passes and throw the first one's
+# result away. Push runs get a per-run group instead, which keeps them out of
+# the mechanism entirely — a merge to main should always be built.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Every job runs `cargo verify --only <lane>`, so the lane definition in
+# xtask/src/lane.rs is the single source of truth for what a check *is* —
+# a green `cargo verify` locally means a green PR because both sides run the
+# same code, not because two files were kept in sync by hand.
+#
+# One job per lane rather than one job running everything: the lanes are
+# independent, so the runner parallelises them.
+#
+# No job names a Rust version. The project tracks current stable, so each job
+# updates rustup's stable and lets `rust-version` in Cargo.toml be the only
+# version statement anywhere — a runner whose preinstalled stable is too old
+# then fails with cargo's clear "not supported by the following packages"
+# rather than a confusing compile error.
+jobs:
+  verify:
+    name: ${{ matrix.lane }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Every lane reports independently: a clippy failure should not hide the
+      # fact that the tests also broke.
+      fail-fast: false
+      matrix:
+        lane: [fmt, clippy, build, test, doc]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use current stable Rust
+        run: rustup update stable --no-self-update && rustup default stable
+
+      # One shared cache across the matrix. The `test` job owns the save: its
+      # linked test binaries are the costliest half to rebuild, and one writer
+      # means the jobs do not race for the same key.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+          save-if: ${{ matrix.lane == 'test' }}
+
+      - name: cargo verify --only ${{ matrix.lane }}
+        run: cargo verify --only ${{ matrix.lane }}

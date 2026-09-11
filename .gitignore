@@ -1,0 +1,24 @@
+# Cargo build output
+/target/
+
+# insta writes these when a snapshot changes; `cargo insta review` either
+# accepts them into the .snap beside them or discards them. A committed .new
+# means a snapshot diff was never looked at.
+*.snap.new
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# claude-commander worktrees
+.claude/worktrees/

@@ -1,0 +1,24 @@
+[package]
+name = "frascii-core"
+description = "Frontend-agnostic fractal logic: escape-time kernels over the complex plane"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# Empty, and the emptiest block in the workspace is the point: this is the crate
+# every frontend can consume, so it holds nothing presentational and nothing
+# host-bound. No colour, no glyph, no cell type, no terminal, no `std::io`.
+#
+# Note "no cell type", not "no grid": a *sample* grid of `Escape` values is
+# this crate's output and belongs here. It is a grid of glyphs and colours
+# that does not.
+#
+# A numeric or parallelism dependency could legitimately land here one day. A
+# presentation one never can — that is the whole boundary.
+[dependencies]
+
+[lints]
+workspace = true

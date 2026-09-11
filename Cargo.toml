@@ -1,0 +1,103 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+# A virtual workspace: the root manifest describes no crate of its own, so
+# `cargo build` here means "every member" and there is no root package whose
+# name a `cargo install`/`--version` output could accidentally inherit.
+#
+# Dependency direction is one-way and enforced by these crates' own
+# `[dependencies]` blocks, which are the whole check:
+#
+#   frascii-core      frontend-agnostic fractal logic; no presentation, no host
+#          ^
+#   frascii-tui       the terminal frontend: rendering + ratatui + key dispatch
+#          ^
+#   frascii           the binary: clap + wiring, nothing else
+#
+# Rendering sits with the terminal frontend rather than in a crate of its own.
+# That is a deliberate simplification while the pipeline is being designed, and
+# it is reversible by construction: `frascii-tui`'s `render` module takes no
+# ratatui dependency, so extracting it for a second frontend is a file move.
+# The rule that still binds is the other direction — nothing presentational and
+# nothing host-bound may drift down into `frascii-core`.
+#
+# `xtask` is the repo's task runner (`cargo verify`), not part of the product.
+#
+# This project tracks current stable Rust deliberately, rather than supporting
+# a range: `rust-version` is current stable, not the oldest compiler that
+# happens to work. There is no rust-toolchain.toml -- whatever `stable` your
+# rustup has is the toolchain -- so this line is the only version statement in
+# the repo, and it is what makes "too old" a clear cargo error rather than a
+# confusing compile failure.
+#
+# It is also a dependency-resolution input, because `resolver = "3"` is
+# MSRV-aware: declaring current stable lets cargo pick the newest version each
+# crate offers, where an understated floor silently holds them back. Raising
+# this from 1.88 to 1.98 moved four transitive deps forward on its own. (The
+# floors below are each crate's current latest, as `cargo add` writes them.)
+#
+# For reference, the lowest version anything here actually *needs* is 1.88:
+# ratatui 0.30 declares 1.88.0 and the event loop uses a let-chain. That is the
+# number to drop back to if supporting older compilers ever matters.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["frascii contributors"]
+license = "MIT"
+repository = "https://github.com/sizeak/frascii"
+rust-version = "1.98"
+
+[workspace.dependencies]
+frascii-core = { path = "crates/frascii-core", version = "0.1.0" }
+frascii-tui = { path = "crates/frascii-tui", version = "0.1.0" }
+
+clap = { version = "4.6.6", features = ["derive"] }
+insta = "1.48.0"
+ratatui = "0.30.2"
+thiserror = "2.0.20"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+# Inherited by every member via `[lints] workspace = true`. One table, so a lint
+# decision is made once rather than drifting per crate.
+#
+# `clippy::pedantic` is deliberately NOT enabled here. CI runs clippy with
+# `-D warnings`, so enabling a group promotes every lint in it to a build
+# failure -- and a real-time renderer casts between `f64`, `u32` and `usize` on
+# every cell of every frame, which `cast_precision_loss`,
+# `cast_possible_truncation` and `cast_sign_loss` would flag hundreds of times
+# over in exactly the code where the cast is the point. Reach for individual
+# pedantic lints below when one earns its keep; do not add the group.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Individually chosen, not a group, so that enabling one is a decision rather
+# than a side effect of enabling fifty.
+doc_markdown = "warn"
+explicit_iter_loop = "warn"
+manual_let_else = "warn"
+needless_pass_by_value = "warn"
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# The interactive loop is unusable in an unoptimised build -- an escape-time
+# kernel over a full terminal of cells at 30fps is the whole workload -- so the
+# dev profile optimises dependencies and the workspace's own numeric code while
+# keeping debug assertions and symbols. Without this, `cargo run` renders a
+# slideshow and the first instinct is to blame the algorithm.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

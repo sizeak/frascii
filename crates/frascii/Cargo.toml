@@ -1,0 +1,26 @@
+[package]
+name = "frascii"
+description = "A terminal ASCII-art renderer for realtime fractals"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+keywords = ["fractal", "ascii", "tui", "mandelbrot", "terminal"]
+categories = ["command-line-utilities", "visualization"]
+
+# `clap` lives here and only here. Defining a CLI is a binary's job: a library
+# embedding frascii should never inherit an argument parser it has no use for,
+# and a clap derive takes its program name and version from the package it
+# compiles in — so a `Parser` defined in a library would print that library's
+# name from `--version`.
+[dependencies]
+clap.workspace = true
+frascii-tui.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

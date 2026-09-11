@@ -1,0 +1,16 @@
+---
+source: crates/frascii-tui/src/render_tests.rs
+expression: "frame(&App::new(), 60, 12)"
+---
+"┌──────────────────────── frascii ─────────────────────────┐"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                       frascii 0.1.0                      │"
+"│                  realtime ascii fractals                 │"
+"│                      press q to quit                     │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"└──────────────────────────────────────────────────────────┘"
