@@ -15,9 +15,9 @@ cargo verify              every lane: fmt, clippy, build, test, doc
 cargo verify --only doc   one lane (each CI job runs exactly this)
 cargo verify --list       the lane / exit-code table
 cargo test -p frascii-tui smooth     one crate, one filter — plain cargo
-cargo run -p frascii                 the TUI
-cargo run --release -p frascii       ... release profile (see Performance)
-cargo run -p frascii -- --log target/frascii.log -vv    ... with logging
+cargo run                            the TUI (the default binary)
+cargo run --release                  ... release profile (see Performance)
+cargo run -- --log target/frascii.log -vv               ... with logging
 ```
 
 Every selected lane runs even after an earlier one fails. Output goes to `target/verify-logs/<lane>.log`; only a 40-line tail is printed. **The process exits with the first failing lane's reserved code** — **10** fmt, **11** clippy, **12** build, **13** test, **14** doc, and **2** for bad arguments — so you can tell what broke without opening a log. Unit tests assert the codes stay distinct and clear of the usage code.
@@ -135,6 +135,8 @@ The interactive loop is the product, so its cost is a correctness concern rather
 ## Testing
 
 Unit tests are co-located (`#[cfg(test)]`). Use red–green TDD: failing test first. Bug fixes need a regression test too — if the fix seems to live somewhere untestable, push the logic into a library crate rather than skipping the test.
+
+`default-members` is `crates/*`, which is what makes a bare `cargo run` start the TUI — but it also means **a bare `cargo test` runs the product crates only and skips xtask's own tests**, the CI-matrix guard among them. Every verify lane passes `--workspace`, so `cargo verify` covers them; a bare `cargo test` is 29 tests where the lane is 41.
 
 **Tests must not write anywhere outside a `tempfile::TempDir`** (add the dependency when one first needs it). *Reading* the checkout is fine and two tests do it, both via `include_str!` so the read happens at compile time: the CI-matrix guard and `this_module_stays_free_of_ratatui`. A path-shaped *value* that is never touched on disk is fine too — `cli_args.rs` and `runner.rs` each assert on one — but never open a hardcoded path.
 

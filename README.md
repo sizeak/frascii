@@ -13,13 +13,15 @@ Linux and macOS. Windows is not supported.
 ```sh
 git clone https://github.com/sizeak/frascii
 cd frascii
-cargo run -p frascii
+cargo run
 ```
+
+`frascii` is the workspace's default binary, so `cargo run` needs no `-p`.
 
 For anything performance-related use the release profile — the dev profile keeps debug assertions and does not apply link-time optimisation:
 
 ```sh
-cargo run --release -p frascii
+cargo run --release
 ```
 
 ## Usage
@@ -37,7 +39,7 @@ Options:
 `--log` takes a file rather than a stream because the TUI owns the alternate screen: a log line on stdout or stderr is painted over the render. Tail it from a second terminal:
 
 ```sh
-cargo run -p frascii -- --log target/frascii.log -vv
+cargo run -- --log target/frascii.log -vv
 tail -f target/frascii.log      # ... in another terminal
 ```
 
@@ -73,6 +75,7 @@ cargo verify                      # every lane: fmt, clippy, build, test, doc
 cargo verify --only clippy        # one lane
 cargo verify --list               # the lane / exit-code table
 cargo test -p frascii-tui         # one crate's tests (plain cargo)
+cargo run                         # the TUI
 ```
 
 `cargo verify` is an alias for the `xtask` crate — a normal workspace member, so the task runner is Rust, built by cargo and tested by `cargo test`. Every lane runs even after an earlier one fails, output is captured to `target/verify-logs/`, and the process exits with the first failing lane's reserved code (10 fmt, 11 clippy, 12 build, 13 test, 14 doc).

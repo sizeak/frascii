@@ -1,6 +1,17 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "xtask"]
+# `cargo run` with no arguments runs the TUI. That works because the default
+# set holds exactly one binary target: `frascii`, with `frascii-core` and
+# `frascii-tui` being libraries. Without this, `cargo run` cannot choose
+# between `frascii` and `xtask` and simply errors.
+#
+# Leaving the task runner out of the default set is also right on its own
+# terms -- a bare `cargo build` should not compile the tooling -- but it has
+# one consequence worth knowing: a bare `cargo test` runs the product crates
+# only and skips xtask's own tests. Every verify lane passes `--workspace`, so
+# `cargo verify` covers them; see the note in CLAUDE.md's Testing section.
+default-members = ["crates/*"]
 
 # A virtual workspace: the root manifest describes no crate of its own, so
 # `cargo build` here means "every member" and there is no root package whose
