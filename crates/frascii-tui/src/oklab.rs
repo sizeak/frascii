@@ -1,4 +1,4 @@
-//! Oklab, for interpolating between colours without passing through mud.
+//! Colour-space maths: Oklab for interpolating, linear light for averaging.
 //!
 //! Why this exists at all: interpolating in sRGB between two saturated,
 //! near-complementary colours takes the midpoint through desaturated grey. That
@@ -11,6 +11,13 @@
 //! saturated and the lightness reads evenly. The conversion is not cheap, but it
 //! runs once per palette at startup while the lookup table is baked, so its cost
 //! is irrelevant — see [`crate::palette`].
+//!
+//! Averaging is a separate problem from interpolating and wants a different
+//! space. Oklab is right for walking *between* two chosen colours; a box filter
+//! over supersamples wants **linear light**, because that is the space where
+//!光 adds. Averaging sRGB values directly makes a half-and-half edge come out
+//! around 10–20% too dark, which on a fractal shows as dark fringing along
+//! exactly the filigree supersampling was turned on to resolve.
 //!
 //! Constants and matrices are Björn Ottosson's, from the original Oklab post
 //! (<https://bottosson.github.io/posts/oklab/>). They are reproduced rather than
@@ -42,6 +49,76 @@ impl Oklab {
             b: self.b + (other.b - self.b) * t,
         }
     }
+}
+
+/// sRGB byte to linear light, tabulated.
+///
+/// The forward conversion is a `powf` per channel, and a box filter calls it
+/// once per subsample per channel — sixteen times a cell at 4× supersampling.
+/// 256 entries is the whole domain, so the table is exact rather than an
+/// approximation, and it is 2KB.
+static TO_LINEAR: [f64; 256] = {
+    let mut table = [0.0; 256];
+    let mut i = 0;
+    while i < 256 {
+        // `const`-compatible arithmetic only, so the sRGB curve is expanded
+        // rather than calling `powf`: this runs at compile time.
+        table[i] = srgb_to_linear_const(i as u8);
+        i += 1;
+    }
+    table
+};
+
+/// The sRGB transfer curve, in `const`-evaluable arithmetic.
+const fn srgb_to_linear_const(value: u8) -> f64 {
+    let c = value as f64 / 255.0;
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        // `powf` is not const, so approximate x^2.4 as x^2 · x^0.4 via a few
+        // Newton steps on the 5th root. Accurate to well under one 8-bit step,
+        // and the round-trip test below is what stands behind that claim.
+        let base = (c + 0.055) / 1.055;
+        let fifth = nth_root_5(base);
+        base * base * fifth * fifth
+    }
+}
+
+/// The real fifth root of `x` for `x` in `0.0 ..= 1.0`, by Newton's method.
+const fn nth_root_5(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut guess = x;
+    let mut i = 0;
+    while i < 40 {
+        let g4 = guess * guess * guess * guess;
+        guess = guess - (guess * g4 - x) / (5.0 * g4);
+        i += 1;
+    }
+    guess
+}
+
+/// The mean of a set of colours, computed in linear light.
+///
+/// Empty input gives black, which is what an out-of-range cell should be.
+pub(crate) fn average(colours: impl IntoIterator<Item = Rgb>) -> Rgb {
+    let mut sum = [0.0_f64; 3];
+    let mut count = 0.0_f64;
+    for colour in colours {
+        sum[0] += TO_LINEAR[colour.r as usize];
+        sum[1] += TO_LINEAR[colour.g as usize];
+        sum[2] += TO_LINEAR[colour.b as usize];
+        count += 1.0;
+    }
+    if count == 0.0 {
+        return Rgb::BLACK;
+    }
+    Rgb::new(
+        channel_from_linear(sum[0] / count),
+        channel_from_linear(sum[1] / count),
+        channel_from_linear(sum[2] / count),
+    )
 }
 
 /// One sRGB channel, 0–255, to linear light, 0.0–1.0.
@@ -135,6 +212,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_linear_table_matches_the_runtime_conversion() {
+        // The table is built in `const` arithmetic that approximates `powf`,
+        // so this is what stands behind calling it exact.
+        for value in 0..=255u8 {
+            let tabulated = TO_LINEAR[value as usize];
+            let computed = channel_to_linear(value);
+            assert!(
+                (tabulated - computed).abs() < 1e-9,
+                "value {value}: table {tabulated} vs computed {computed}"
+            );
+        }
+    }
+
+    #[test]
+    fn averaging_one_colour_returns_it() {
+        for colour in [Rgb::BLACK, Rgb::new(255, 255, 255), Rgb::new(17, 99, 200)] {
+            assert_eq!(average([colour]), colour, "{colour:?}");
+        }
+    }
+
+    #[test]
+    fn averaging_nothing_gives_black() {
+        assert_eq!(average(std::iter::empty()), Rgb::BLACK);
+    }
+
+    #[test]
+    fn averaging_happens_in_linear_light_not_srgb() {
+        // The whole reason this is not a plain arithmetic mean. Half black and
+        // half white is perceptually mid-grey around 188 in sRGB, not 128 —
+        // averaging the encoded bytes makes every mixed edge too dark, which
+        // on a fractal is dark fringing along the filigree.
+        let mixed = average([Rgb::BLACK, Rgb::new(255, 255, 255)]);
+        let naive = 128u8;
+        assert!(
+            mixed.r > naive + 40,
+            "linear average {} should be far brighter than the sRGB mean {naive}",
+            mixed.r
+        );
+        assert!(mixed.r < 200, "but not blown out: {}", mixed.r);
+        assert_eq!(mixed.r, mixed.g);
+        assert_eq!(mixed.g, mixed.b);
+    }
+
+    #[test]
+    fn averaging_is_order_independent() {
+        let a = Rgb::new(200, 30, 90);
+        let b = Rgb::new(10, 190, 40);
+        let c = Rgb::new(64, 64, 255);
+        assert_eq!(average([a, b, c]), average([c, a, b]));
+    }
+
+    #[test]
+    fn an_average_stays_inside_the_range_of_its_inputs() {
+        let dark = Rgb::new(20, 10, 30);
+        let light = Rgb::new(200, 180, 220);
+        let mid = average([dark, light, dark, light]);
+        assert!(mid.r > dark.r && mid.r < light.r, "{mid:?}");
+        assert!(mid.g > dark.g && mid.g < light.g, "{mid:?}");
+        assert!(mid.b > dark.b && mid.b < light.b, "{mid:?}");
     }
 
     #[test]

@@ -19,8 +19,9 @@
 //!
 //! Like [`crate::render`], this module takes no ratatui dependency.
 
-use frascii_core::SampleGrid;
+use frascii_core::{Escape, SampleGrid};
 
+use crate::oklab;
 use crate::palette::Palette;
 use crate::ramp;
 use crate::render::{Cell, Grid};
@@ -76,23 +77,74 @@ impl CellMode {
             Self::HalfBlock => "half-block",
         }
     }
+}
 
-    /// The sample aspect a viewport needs for this mode.
-    ///
-    /// `cell_aspect × across / down` — the one formula that covers every
-    /// sub-cell layout, so a new mode is a row in `subdivisions` and nothing
-    /// else. See `Viewport::sample_aspect`.
+/// How many samples are averaged into each output pixel, per axis.
+///
+/// Supersampling multiplies the lattice in **both** axes, which is exactly why
+/// it does not disturb the sample aspect: `cell_aspect × (across·k) / (down·k)`
+/// is the same number for every `k`. That invariance is what lets it be its own
+/// setting instead of a combinatorial explosion of [`CellMode`] variants.
+///
+/// Capped low on purpose, and the cap is measured rather than guessed. At 1e6
+/// magnification on a Ryzen 9 7940HS, per frame at 20,000 output pixels:
+///
+/// | | samples | frame | fps |
+/// |---|---|---|---|
+/// | 1× | 20,000 | 7.3ms | 138 |
+/// | 2× | 80,000 | 18.2ms | 55 |
+/// | 3× | 180,000 | 88.5ms | 11 |
+///
+/// So **2× is the highest that holds 30fps at depth, and 3× does not** — an
+/// earlier version of this comment guessed the wall was at 4×, which the
+/// numbers above disagree with. 3× is kept because a *parked* view does not
+/// care about frame rate and it is the sharpest still the renderer can produce;
+/// it is a poor choice while anything is moving, and the status line shows the
+/// cost while you make the trade.
+///
+/// Note the scaling is worse than the `k²` samples suggest — nine times the
+/// samples cost twelve times the time. Untested, but the likely cause is that
+/// 180,000 samples no longer fit in cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Supersample {
+    /// One sample per output pixel.
+    #[default]
+    Off,
+    /// 2×2 samples averaged per output pixel.
+    X2,
+    /// 3×3 samples averaged per output pixel.
+    X3,
+}
+
+impl Supersample {
+    /// Samples per axis.
     #[must_use]
-    pub fn sample_aspect(self, cell_aspect: f64) -> f64 {
-        let (across, down) = self.subdivisions();
-        cell_aspect * across as f64 / down as f64
+    pub const fn factor(self) -> usize {
+        match self {
+            Self::Off => 1,
+            Self::X2 => 2,
+            Self::X3 => 3,
+        }
     }
 
-    /// The sample lattice needed to fill `cols × rows` character cells.
+    /// The next setting, for a key that cycles.
     #[must_use]
-    pub const fn lattice(self, cols: usize, rows: usize) -> (usize, usize) {
-        let (across, down) = self.subdivisions();
-        (cols * across, rows * down)
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Off => Self::X2,
+            Self::X2 => Self::X3,
+            Self::X3 => Self::Off,
+        }
+    }
+
+    /// The setting's name, for a status line.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "1x",
+            Self::X2 => "2x",
+            Self::X3 => "3x",
+        }
     }
 }
 
@@ -111,6 +163,36 @@ pub struct Shader {
     pub phase: f64,
     /// How samples map onto cells.
     pub mode: CellMode,
+    /// How many samples are averaged into each output pixel.
+    pub supersample: Supersample,
+}
+
+impl Shader {
+    /// Samples across and down one character cell, including supersampling.
+    #[must_use]
+    pub const fn subdivisions(&self) -> (usize, usize) {
+        let (across, down) = self.mode.subdivisions();
+        let k = self.supersample.factor();
+        (across * k, down * k)
+    }
+
+    /// The sample lattice needed to fill `cols × rows` character cells.
+    #[must_use]
+    pub const fn lattice(&self, cols: usize, rows: usize) -> (usize, usize) {
+        let (across, down) = self.subdivisions();
+        (cols * across, rows * down)
+    }
+
+    /// The sample aspect a viewport needs for this configuration.
+    ///
+    /// `cell_aspect × across / down` — one formula covering every sub-cell
+    /// layout, and invariant under supersampling because that multiplies both
+    /// terms. See `Viewport::sample_aspect`.
+    #[must_use]
+    pub fn sample_aspect(&self, cell_aspect: f64) -> f64 {
+        let (across, down) = self.subdivisions();
+        cell_aspect * across as f64 / down as f64
+    }
 }
 
 impl Default for Shader {
@@ -119,6 +201,7 @@ impl Default for Shader {
             palette: Palette::default(),
             phase: 0.0,
             mode: CellMode::default(),
+            supersample: Supersample::default(),
         }
     }
 }
@@ -130,7 +213,7 @@ impl Default for Shader {
 /// before the grids are remade to match, and a panic there would turn a window
 /// drag into a crash.
 pub fn shade_into(shader: &Shader, samples: &SampleGrid, out: &mut Grid) {
-    let (across, down) = shader.mode.subdivisions();
+    let (across, down) = shader.subdivisions();
     let cols = samples.cols() / across.max(1);
     let rows = samples.rows() / down.max(1);
 
@@ -158,25 +241,33 @@ const UPPER_HALF: char = '▀';
 /// No colour is lost when they differ — both 24-bit values survive in the one
 /// cell, which is what makes this mode worth having over braille.
 fn shade_half_block(shader: &Shader, samples: &SampleGrid, out: &mut Grid) {
+    let (sx, sy) = shader.subdivisions();
+    // The cell's block splits vertically: the top half becomes the foreground,
+    // the bottom half the background. With supersampling each half is itself a
+    // block to average.
+    let half = (sy / 2).max(1);
+    let mut top = Vec::with_capacity(sx * half);
+    let mut bottom = Vec::with_capacity(sx * half);
+
     for iy in 0..out.height() {
         for ix in 0..out.width() {
-            let upper = samples.get(ix, iy * 2);
-            let lower = samples.get(ix, iy * 2 + 1);
-            // A missing lower row happens when the sample grid has an odd
-            // height, which a resize can produce for a frame. Reuse the upper
-            // sample rather than skipping the cell: a black half would read as
-            // a one-pixel gap along the bottom edge.
-            let Some(upper) = upper else {
+            collect_block(samples, ix * sx, iy * sy, sx, half, &mut top);
+            collect_block(samples, ix * sx, iy * sy + half, sx, half, &mut bottom);
+            if top.is_empty() {
                 continue;
-            };
-            let lower = lower.unwrap_or(upper);
+            }
+            // An empty bottom half happens when the lattice has an odd row
+            // count, which a resize can produce for a frame. Reuse the top
+            // rather than filling it black: a black half reads as a one-pixel
+            // gap along the bottom edge, which looks like a rendering bug.
+            let lower = if bottom.is_empty() { &top } else { &bottom };
             out.set(
                 ix,
                 iy,
                 Cell::with_background(
                     UPPER_HALF,
-                    colour_for(shader, upper),
-                    colour_for(shader, lower),
+                    oklab::average(top.iter().map(|e| colour_for(shader, *e))),
+                    oklab::average(lower.iter().map(|e| colour_for(shader, *e))),
                 ),
             );
         }
@@ -184,43 +275,71 @@ fn shade_half_block(shader: &Shader, samples: &SampleGrid, out: &mut Grid) {
 }
 
 /// The colour a sample takes, with interior rendering as black.
-fn colour_for(shader: &Shader, escape: frascii_core::Escape) -> crate::render::Rgb {
+fn colour_for(shader: &Shader, escape: Escape) -> crate::render::Rgb {
     match escape.smooth() {
         Some(smooth) => shader.palette.at(smooth + shader.phase),
         None => crate::render::Rgb::BLACK,
     }
 }
 
-/// One sample per cell: the ramp carries density, the palette carries colour.
+/// The ramp carries density, the palette carries colour.
+///
+/// With supersampling on, each cell averages a `k × k` block: the densities are
+/// averaged to pick one glyph, and **the colours are averaged after the palette,
+/// in linear light**. Averaging `smooth` and colouring once instead would give a
+/// boundary cell a colour belonging to neither side — the mean of two iteration
+/// counts is not the mean of the two colours they map to.
 fn shade_glyph(shader: &Shader, samples: &SampleGrid, out: &mut Grid) {
+    let (sx, sy) = shader.subdivisions();
+    let mut block = Vec::with_capacity(sx * sy);
     for iy in 0..out.height() {
         for ix in 0..out.width() {
-            let Some(escape) = samples.get(ix, iy) else {
+            collect_block(samples, ix * sx, iy * sy, sx, sy, &mut block);
+            if block.is_empty() {
                 continue;
-            };
-            out.set(ix, iy, cell_for(shader, escape));
+            }
+            let density = block.iter().map(|e| ramp::density(*e)).sum::<f64>() / block.len() as f64;
+            let colour = oklab::average(block.iter().map(|e| colour_for(shader, *e)));
+            out.set(ix, iy, Cell::new(ramp::glyph_for_density(density), colour));
         }
     }
 }
 
-/// The cell a single sample shades to.
-fn cell_for(shader: &Shader, escape: frascii_core::Escape) -> Cell {
-    let glyph = ramp::glyph(escape);
-    match escape.smooth() {
-        // The phase is added here, and this is the whole of palette cycling:
-        // the samples are untouched, so a cycling frame runs no kernel.
-        Some(smooth) => Cell::new(glyph, shader.palette.at(smooth + shader.phase)),
-        // Interior takes no colour from the palette. Colouring it would tie the
-        // largest solid region of the picture to the cycling phase and make the
-        // whole interior throb.
-        None => Cell::default(),
+/// Gather the samples of a `w × h` block into `out`, replacing its contents.
+///
+/// Reuses the caller's buffer: at 3× supersampling this runs nine times per
+/// cell, and a fresh `Vec` each time would be twenty thousand allocations a
+/// frame.
+fn collect_block(
+    samples: &SampleGrid,
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
+    out: &mut Vec<Escape>,
+) {
+    out.clear();
+    for y in y0..y0 + h {
+        for x in x0..x0 + w {
+            if let Some(escape) = samples.get(x, y) {
+                out.push(escape);
+            }
+        }
     }
+}
+
+/// The cell a single sample shades to, with no supersampling.
+///
+/// The reference the block path must agree with at 1×, which is what
+/// `supersampling_off_matches_the_single_sample_path` asserts.
+#[cfg(test)]
+fn cell_for(shader: &Shader, escape: Escape) -> Cell {
+    Cell::new(ramp::glyph(escape), colour_for(shader, escape))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frascii_core::Escape;
 
     /// A sample grid written by hand — no kernel anywhere in these tests,
     /// which is the split's main justification.
@@ -244,13 +363,17 @@ mod tests {
     #[test]
     fn glyph_mode_is_one_sample_per_cell() {
         assert_eq!(CellMode::Glyph.subdivisions(), (1, 1));
-        assert_eq!(CellMode::Glyph.lattice(80, 24), (80, 24));
+        assert_eq!(Shader::default().lattice(80, 24), (80, 24));
     }
 
     #[test]
     fn half_block_mode_is_two_stacked_samples_per_cell() {
         assert_eq!(CellMode::HalfBlock.subdivisions(), (1, 2));
-        assert_eq!(CellMode::HalfBlock.lattice(80, 24), (80, 48));
+        let shader = Shader {
+            mode: CellMode::HalfBlock,
+            ..Shader::default()
+        };
+        assert_eq!(shader.lattice(80, 24), (80, 48));
     }
 
     #[test]
@@ -273,8 +396,12 @@ mod tests {
 
         let mut views = Vec::new();
         for mode in [CellMode::Glyph, CellMode::HalfBlock] {
-            let (cols, rows) = mode.lattice(CELLS.0, CELLS.1);
-            let vp = frascii_core::Viewport::home(cols, rows, mode.sample_aspect(CELL_ASPECT));
+            let shader = Shader {
+                mode,
+                ..Shader::default()
+            };
+            let (cols, rows) = shader.lattice(CELLS.0, CELLS.1);
+            let vp = frascii_core::Viewport::home(cols, rows, shader.sample_aspect(CELL_ASPECT));
             views.push((vp.half_width, vp.half_height(), vp.centre));
         }
         let (gw, gh, gc) = views[0];
@@ -282,6 +409,166 @@ mod tests {
         assert!((gw - hw).abs() < 1e-12, "widths differ: {gw} vs {hw}");
         assert!((gh - hh).abs() < 1e-12, "heights differ: {gh} vs {hh}");
         assert_eq!(gc, hc, "centres differ");
+    }
+
+    #[test]
+    fn supersampling_is_off_by_default_and_cycles() {
+        assert_eq!(Supersample::default(), Supersample::Off);
+        assert_eq!(Supersample::Off.factor(), 1);
+        assert_eq!(Supersample::X2.factor(), 2);
+        assert_eq!(Supersample::X3.factor(), 3);
+        assert_eq!(Supersample::Off.next(), Supersample::X2);
+        assert_eq!(Supersample::X3.next(), Supersample::Off, "must wrap");
+        assert_eq!(Supersample::X2.name(), "2x");
+    }
+
+    #[test]
+    fn supersampling_multiplies_the_lattice_in_both_axes() {
+        let shader = Shader {
+            supersample: Supersample::X3,
+            ..Shader::default()
+        };
+        assert_eq!(shader.subdivisions(), (3, 3));
+        assert_eq!(shader.lattice(20, 10), (60, 30));
+
+        // And it composes with half-block rather than replacing it.
+        let both = Shader {
+            mode: CellMode::HalfBlock,
+            supersample: Supersample::X2,
+            ..Shader::default()
+        };
+        assert_eq!(both.subdivisions(), (2, 4));
+        assert_eq!(both.lattice(20, 10), (40, 40));
+    }
+
+    #[test]
+    fn the_sample_aspect_is_invariant_under_supersampling() {
+        // **The property that lets supersampling be its own setting** rather
+        // than a combinatorial explosion of modes: it multiplies both axes, so
+        // the ratio — and therefore the plane region on screen — is unchanged.
+        for mode in [CellMode::Glyph, CellMode::HalfBlock] {
+            let base = Shader {
+                mode,
+                ..Shader::default()
+            }
+            .sample_aspect(2.0);
+            for supersample in [Supersample::X2, Supersample::X3] {
+                let scaled = Shader {
+                    mode,
+                    supersample,
+                    ..Shader::default()
+                }
+                .sample_aspect(2.0);
+                assert!(
+                    (scaled - base).abs() < 1e-12,
+                    "{mode:?} at {supersample:?}: {scaled} vs {base}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn supersampling_off_matches_the_single_sample_path() {
+        // At 1× the block path must be exactly the old single-sample path, or
+        // turning supersampling on and off would visibly shift the picture.
+        let samples = grid_from(&[
+            &[escaped(1.0), Escape::Interior, escaped(600.0)],
+            &[escaped(40.0), escaped(3.5), Escape::Interior],
+        ]);
+        let shader = Shader::default();
+        let mut out = Grid::new(0, 0);
+        shade_into(&shader, &samples, &mut out);
+
+        for iy in 0..2 {
+            for ix in 0..3 {
+                let expected = cell_for(&shader, samples.get(ix, iy).expect("in range"));
+                assert_eq!(out.get(ix, iy), Some(expected), "at {ix},{iy}");
+            }
+        }
+    }
+
+    #[test]
+    fn supersampling_antialiases_a_boundary() {
+        // The whole point. A cell whose 2×2 block straddles the edge — two
+        // interior samples, two deep-exterior — must come out *between* the
+        // two, where a single centre sample would snap to whichever side it
+        // landed on.
+        let straddling = grid_from(&[
+            &[Escape::Interior, escaped(600.0)],
+            &[Escape::Interior, escaped(600.0)],
+        ]);
+        let shader = Shader {
+            supersample: Supersample::X2,
+            ..Shader::default()
+        };
+        let mut out = Grid::new(0, 0);
+        shade_into(&shader, &straddling, &mut out);
+
+        assert_eq!((out.width(), out.height()), (1, 1));
+        let cell = out.get(0, 0).expect("one cell");
+
+        // Neither extreme: not blank like the interior, not solid like a deep
+        // escape.
+        assert_ne!(cell.glyph, ' ', "collapsed to the interior");
+        assert_ne!(cell.glyph, '@', "collapsed to the exterior");
+
+        // And the colour is a genuine mix rather than one side's.
+        let interior = colour_for(&shader, Escape::Interior);
+        let exterior = colour_for(&shader, escaped(600.0));
+        assert_ne!(cell.colour, interior);
+        assert_ne!(cell.colour, exterior);
+    }
+
+    #[test]
+    fn colour_is_averaged_after_the_palette_not_before() {
+        // Averaging `smooth` and colouring once would give a boundary cell a
+        // colour belonging to neither side, because the palette is cyclic: the
+        // mean of two iteration counts can land anywhere in the gradient,
+        // including on a hue neither sample had.
+        //
+        // Two samples a full half-period apart make the difference visible.
+        let a = 4.0;
+        let b = 4.0 + Palette::PERIOD / 2.0;
+        let samples = grid_from(&[&[escaped(a), escaped(b)], &[escaped(a), escaped(b)]]);
+        let shader = Shader {
+            supersample: Supersample::X2,
+            ..Shader::default()
+        };
+        let mut out = Grid::new(0, 0);
+        shade_into(&shader, &samples, &mut out);
+        let averaged_colour = out.get(0, 0).expect("one cell").colour;
+
+        // What the wrong order would have produced.
+        let averaged_smooth = shader.palette.at((a + b) / 2.0);
+        assert_ne!(
+            averaged_colour, averaged_smooth,
+            "the mean of two colours should not equal the colour of the mean"
+        );
+    }
+
+    #[test]
+    fn half_block_supersamples_each_half_independently() {
+        // 2× on half-block gives a 2×4 block: the top 2×2 becomes the
+        // foreground, the bottom 2×2 the background, each averaged on its own.
+        let samples = grid_from(&[
+            &[escaped(2.0), escaped(2.0)],
+            &[escaped(2.0), escaped(2.0)],
+            &[escaped(500.0), escaped(500.0)],
+            &[escaped(500.0), escaped(500.0)],
+        ]);
+        let shader = Shader {
+            mode: CellMode::HalfBlock,
+            supersample: Supersample::X2,
+            ..Shader::default()
+        };
+        let mut out = Grid::new(0, 0);
+        shade_into(&shader, &samples, &mut out);
+
+        assert_eq!((out.width(), out.height()), (1, 1));
+        let cell = out.get(0, 0).expect("one cell");
+        // Uniform halves, so each average is exactly its own sample's colour.
+        assert_eq!(cell.colour, colour_for(&shader, escaped(2.0)));
+        assert_eq!(cell.background, colour_for(&shader, escaped(500.0)));
     }
 
     #[test]
@@ -383,13 +670,18 @@ mod tests {
     fn the_sample_aspect_follows_the_subdivision_formula() {
         // Glyph mode: one sample spans a whole cell, so a sample is as tall as
         // a cell — twice its width.
-        assert!((CellMode::Glyph.sample_aspect(2.0) - 2.0).abs() < 1e-12);
+        let glyph = Shader::default();
+        let half = Shader {
+            mode: CellMode::HalfBlock,
+            ..Shader::default()
+        };
+        assert!((glyph.sample_aspect(2.0) - 2.0).abs() < 1e-12);
         // Half-block: two stacked samples, so each is square.
-        assert!((CellMode::HalfBlock.sample_aspect(2.0) - 1.0).abs() < 1e-12);
+        assert!((half.sample_aspect(2.0) - 1.0).abs() < 1e-12);
         // And both track the cell aspect rather than hardcoding it, which is
         // the knob a user with an unusual font would reach for.
-        assert!((CellMode::Glyph.sample_aspect(2.4) - 2.4).abs() < 1e-12);
-        assert!((CellMode::HalfBlock.sample_aspect(2.4) - 1.2).abs() < 1e-12);
+        assert!((glyph.sample_aspect(2.4) - 2.4).abs() < 1e-12);
+        assert!((half.sample_aspect(2.4) - 1.2).abs() < 1e-12);
     }
 
     #[test]

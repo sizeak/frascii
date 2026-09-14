@@ -52,9 +52,25 @@ pub(crate) fn density(escape: Escape) -> f64 {
 /// very lightest exterior. The colour tells them apart, so a symbols-only
 /// snapshot cannot — worth knowing before reading one and concluding the ramp is
 /// broken.
+///
+/// The shading path goes through [`glyph_for_density`] instead, because it
+/// averages a block first. This single-sample form is kept as the reference
+/// that the block path must agree with at 1×.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn glyph(escape: Escape) -> char {
-    let index = (density(escape) * RAMP.len() as f64) as usize;
+    glyph_for_density(density(escape))
+}
+
+/// The glyph for an already-computed density.
+///
+/// Separate from [`glyph`] because supersampling averages the densities of a
+/// block and then picks *one* glyph for the cell — which is the antialiasing: a
+/// cell straddling the boundary gets an intermediate weight rather than
+/// whichever single sample happened to land at its centre.
+#[must_use]
+pub(crate) fn glyph_for_density(density: f64) -> char {
+    let index = (density.clamp(0.0, 1.0) * RAMP.len() as f64) as usize;
     RAMP[index.min(RAMP.len() - 1)]
 }
 

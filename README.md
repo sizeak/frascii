@@ -2,7 +2,7 @@
 
 A terminal ASCII-art renderer for realtime fractals — a live, colourful ASCII rendering of escape-time fractals drawn straight into your terminal.
 
-> **Status: complete for what it set out to do.** Mandelbrot and Julia sets in glyph or half-block rendering, with pan, zoom, nine truecolour palettes, palette cycling, a Julia parameter orbit, and an unattended auto-zoom that dives forever. What is deliberately *not* here is listed in [CLAUDE.md](CLAUDE.md#not-yet-designed).
+> **Status: it runs.** Launch it and the Mandelbrot set dives forever with the colours drifting. Mandelbrot and Julia sets, glyph or half-block rendering, optional supersampling, pan and zoom, nine truecolour palettes, a Julia parameter orbit. What is deliberately *not* here is listed in [CLAUDE.md](CLAUDE.md#not-yet-designed).
 
 ```
 :::::::::::::::::::::::::::::::::::::::::::::-------------------===+-----------:::::::::::::::::
@@ -95,6 +95,7 @@ tail -f target/frascii.log      # ... in another terminal
 | `Tab` / `f` | Next fractal (Mandelbrot, Julia) |
 | `p` | Next palette |
 | `m` | Glyph / half-block rendering |
+| `s` | Supersampling: 1× / 2× / 3× |
 | `i` | Status line |
 | `c` | Palette cycling on/off |
 | `o` | Julia parameter orbit |
@@ -102,7 +103,13 @@ tail -f target/frascii.log      # ... in another terminal
 | `Space` | Pause all motion |
 | `q` / `Esc` / `Ctrl+C` | Quit |
 
+`s` supersamples: each output pixel averages a `k × k` block of samples, which antialiases the boundary instead of snapping each cell to whichever sample landed at its centre. Colours are averaged *after* the palette and in linear light — averaging iteration counts and colouring once would give a boundary cell a colour belonging to neither side, and averaging sRGB bytes would make every mixed edge too dark.
+
+It costs `k²` times the samples, measured at 1e6 magnification on a 20,000-pixel frame: 7.3ms at 1×, 18.2ms at 2×, 88.5ms at 3×. So 2× still holds 30fps and **3× does not** — use 3× on a parked view, where frame rate does not matter and it is the sharpest still available.
+
 ### Motion
+
+**All of this is running when you launch.** The dive and the palette drift are on by default, because a static first frame is not what a realtime renderer should open with. Touching any navigation key stops the dive and hands you control; `z` starts it again.
 
 `c` drifts the colour mapping without touching the samples, so it costs one pass over an existing grid and no fractal maths at all — it composes with everything else.
 

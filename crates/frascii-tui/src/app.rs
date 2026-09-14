@@ -16,7 +16,7 @@ use crate::clock::Clock;
 use crate::error::Result;
 use crate::palette::Palette;
 use crate::render::Grid;
-use crate::shade::{CellMode, Shader, shade_into};
+use crate::shade::{CellMode, Shader, Supersample, shade_into};
 
 /// The frame period: how long one iteration of the loop should take in total.
 ///
@@ -181,9 +181,9 @@ pub struct App {
     clock: Clock,
     /// Whether the palette drifts on its own.
     ///
-    /// Independent of [`Drive`] rather than a variant of it, because cycling
-    /// composes with everything: it changes only the shader, so it can run
-    /// during a dive, an orbit, or a still frame.
+    /// On at startup. Independent of [`Drive`] rather than a variant of it,
+    /// because cycling composes with everything: it changes only the shader, so
+    /// it can run during a dive, an orbit, or a still frame.
     cycling: bool,
     /// What is moving the view.
     drive: Drive,
@@ -210,7 +210,15 @@ impl App {
                 // Zero-sized until the first `update` learns the terminal's
                 // size. Sampling a zero grid is legal and costs nothing, so
                 // there is no special first-frame path to get wrong.
-                viewport: Viewport::home(0, 0, mode.sample_aspect(CELL_ASPECT)),
+                viewport: Viewport::home(
+                    0,
+                    0,
+                    Shader {
+                        mode,
+                        ..Shader::default()
+                    }
+                    .sample_aspect(CELL_ASPECT),
+                ),
                 kernel: Kernel::default(),
                 limit: 0,
             },
@@ -225,8 +233,19 @@ impl App {
             limit_bias: 0,
             hud: false,
             clock: Clock::new(),
-            cycling: false,
-            drive: Drive::Still,
+            // Both on by default, because "realtime fractal renderer" is the
+            // whole premise and a static first frame does not deliver it.
+            //
+            // Cycling alone is not enough, and that distinction is the point:
+            // it moves the *colour* while the shape stands still, which reads
+            // as a tinted photograph rather than a live render. The dive is
+            // what makes the geometry move.
+            //
+            // Touching any navigation key stops the dive — see `take_control`
+            // — so this costs an explorer one keypress and gives everyone else
+            // the thing the program is for.
+            cycling: true,
+            drive: Drive::AutoZoom,
             orbit_turns: 0.0,
             dived_from: 1.0,
             retarget_pending: false,
@@ -286,24 +305,25 @@ impl App {
             // not travel through the return value, or `run` would have to
             // re-interpret a decision made here and this would stop being the
             // one place a binding is defined.
-            (KeyCode::Char('h') | KeyCode::Left, _) => self.pan(-1, 0),
-            (KeyCode::Char('l') | KeyCode::Right, _) => self.pan(1, 0),
-            (KeyCode::Char('k') | KeyCode::Up, _) => self.pan(0, -1),
-            (KeyCode::Char('j') | KeyCode::Down, _) => self.pan(0, 1),
+            (KeyCode::Char('h') | KeyCode::Left, _) => self.navigate(|a| a.pan(-1, 0)),
+            (KeyCode::Char('l') | KeyCode::Right, _) => self.navigate(|a| a.pan(1, 0)),
+            (KeyCode::Char('k') | KeyCode::Up, _) => self.navigate(|a| a.pan(0, -1)),
+            (KeyCode::Char('j') | KeyCode::Down, _) => self.navigate(|a| a.pan(0, 1)),
 
             // Zoom. `=` because it is the unshifted `+` on most layouts, so
             // zooming in does not need a modifier.
-            (KeyCode::Char('+' | '='), _) => self.zoom(ZOOM_STEP),
-            (KeyCode::Char('-' | '_'), _) => self.zoom(1.0 / ZOOM_STEP),
+            (KeyCode::Char('+' | '='), _) => self.navigate(|a| a.zoom(ZOOM_STEP)),
+            (KeyCode::Char('-' | '_'), _) => self.navigate(|a| a.zoom(1.0 / ZOOM_STEP)),
 
             // Iteration limit, biased against the viewport's suggestion.
             (KeyCode::Char('.' | '>'), _) => self.bias_limit(1),
             (KeyCode::Char(',' | '<'), _) => self.bias_limit(-1),
 
-            (KeyCode::Char('r' | 'R'), _) => self.reset(),
+            (KeyCode::Char('r' | 'R'), _) => self.navigate(App::reset),
             (KeyCode::Tab | KeyCode::Char('f'), _) => self.next_kernel(),
             (KeyCode::Char('p' | 'P'), _) => self.next_palette(),
             (KeyCode::Char('m' | 'M'), _) => self.next_mode(),
+            (KeyCode::Char('s' | 'S'), _) => self.next_supersample(),
             (KeyCode::Char('i' | 'I'), _) => self.hud = !self.hud,
             (KeyCode::Char('c'), _) => self.cycling = !self.cycling,
             (KeyCode::Char('o' | 'O'), _) => self.toggle_drive(Drive::JuliaOrbit),
@@ -313,6 +333,18 @@ impl App {
             _ => {}
         }
         Flow::Continue
+    }
+
+    /// Run a manual navigation, taking control from whatever was driving.
+    ///
+    /// Panning or zooming while the dive is descending would be a fight the
+    /// user cannot win — the next frame moves the view back. So touching a
+    /// navigation key stops the driver, which is also the only sensible reading
+    /// of the input: you would not press `h` unless you wanted to steer.
+    /// Palette cycling is left running, since it does not move the view.
+    fn navigate(&mut self, action: impl FnOnce(&mut Self)) {
+        self.drive = Drive::Still;
+        action(self);
     }
 
     /// Shift the view by one step, in units of `(dx, dy)` presses.
@@ -468,6 +500,15 @@ impl App {
         }
     }
 
+    /// Cycle the supersampling factor.
+    ///
+    /// Re-samples, and must: the factor multiplies the lattice. It costs `k²`
+    /// times the samples, which is why it stops at 3× — the status line shows
+    /// the frame's iteration limit so the trade is visible while making it.
+    fn next_supersample(&mut self) {
+        self.shader.supersample = self.shader.supersample.next();
+    }
+
     /// Switch between glyph and half-block rendering.
     ///
     /// This does re-sample, and unavoidably: the mode changes the sample
@@ -495,13 +536,12 @@ impl App {
 
         let (cols, rows) = self
             .shader
-            .mode
             .lattice(usize::from(area.width), usize::from(area.height));
 
         if self.params.viewport.cols != cols || self.params.viewport.rows != rows {
             self.params
                 .viewport
-                .resize(cols, rows, self.shader.mode.sample_aspect(CELL_ASPECT));
+                .resize(cols, rows, self.shader.sample_aspect(CELL_ASPECT));
         }
         self.params.limit = self.biased_limit();
 
@@ -577,6 +617,14 @@ impl App {
             Span::styled(self.shader.mode.name().to_owned(), dim),
             Span::styled("  ", dim),
             Span::styled(self.shader.palette.name().to_owned(), dim),
+            Span::styled(
+                if self.shader.supersample == Supersample::Off {
+                    String::new()
+                } else {
+                    format!("  ss{}", self.shader.supersample.name())
+                },
+                dim,
+            ),
             Span::styled(format!("  {:.3e}x  ", viewport.magnification()), dim),
             Span::styled(format!("iter {}", self.params.limit), dim),
         ];
@@ -622,7 +670,7 @@ impl App {
     /// initialised and restored the terminal could not be driven by a test
     /// harness's backend, and one that restored on the happy path only would
     /// leave a raw-mode terminal behind on the first error.
-    pub fn run(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+    pub fn run(&mut self, terminal: &mut crate::BufferedTerminal) -> Result<()> {
         let mut next_frame = Instant::now();
 
         loop {
@@ -693,7 +741,22 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    /// An app sized and sampled once, with all motion stopped.
+    ///
+    /// Parked by default because most of these tests are about a single frame,
+    /// and the shipped defaults move: a dive would change the view between
+    /// updates and make every assertion about "the same frame" a race. Motion
+    /// tests turn what they need back on.
     fn updated(width: u16, height: u16) -> App {
+        let mut app = App::new();
+        app.drive = Drive::Still;
+        app.cycling = false;
+        app.update(Rect::new(0, 0, width, height), Instant::now());
+        app
+    }
+
+    /// An app with the shipped defaults, for testing what a user actually gets.
+    fn launched(width: u16, height: u16) -> App {
         let mut app = App::new();
         app.update(Rect::new(0, 0, width, height), Instant::now());
         app
@@ -1208,9 +1271,7 @@ mod tests {
         // the least.
         let area = Rect::new(0, 0, 40, 15);
         let mut app = updated(40, 15);
-        let _ = app.handle_key(press(KeyCode::Char('c')));
-        app.update(area, Instant::now());
-
+        app.cycling = true;
         let samples = app.samples.clone();
         let cells = app.cells.clone();
         let sampled_for = app.sampled_for;
@@ -1229,7 +1290,7 @@ mod tests {
         // unattended mode running.
         let area = Rect::new(0, 0, 20, 8);
         let mut app = updated(20, 8);
-        let _ = app.handle_key(press(KeyCode::Char('c')));
+        app.cycling = true;
         // Twelve hours of animation, at a second per frame.
         animate(&mut app, area, 43_200, Duration::from_secs(1));
         assert!(
@@ -1243,7 +1304,7 @@ mod tests {
     fn pausing_stops_the_animation_and_resuming_does_not_lurch() {
         let area = Rect::new(0, 0, 30, 10);
         let mut app = updated(30, 10);
-        let _ = app.handle_key(press(KeyCode::Char('c')));
+        app.cycling = true;
         animate(&mut app, area, 5, Duration::from_millis(33));
         let phase = app.shader.phase;
 
@@ -1272,6 +1333,7 @@ mod tests {
 
         let _ = app.handle_key(press(KeyCode::Char('o')));
         assert_eq!(app.kernel_name(), "julia");
+        assert_eq!(app.drive, Drive::JuliaOrbit);
 
         let first = app.params.kernel;
         animate(&mut app, area, 30, Duration::from_millis(100));
@@ -1310,11 +1372,11 @@ mod tests {
         let area = Rect::new(0, 0, 40, 14);
 
         let mut fast = updated(40, 14);
-        let _ = fast.handle_key(press(KeyCode::Char('z')));
+        fast.drive = Drive::AutoZoom;
         animate(&mut fast, area, 60, Duration::from_millis(50));
 
         let mut slow = updated(40, 14);
-        let _ = slow.handle_key(press(KeyCode::Char('z')));
+        slow.drive = Drive::AutoZoom;
         animate(&mut slow, area, 10, Duration::from_millis(300));
 
         assert!(fast.magnification() > 1.0, "the dive did not descend");
@@ -1334,7 +1396,7 @@ mod tests {
         // featureless frame.
         let area = Rect::new(0, 0, 50, 18);
         let mut app = updated(50, 18);
-        let _ = app.handle_key(press(KeyCode::Char('z')));
+        app.drive = Drive::AutoZoom;
 
         let start = Instant::now();
         let step = Duration::from_millis(100);
@@ -1368,7 +1430,7 @@ mod tests {
         // show several visibly mushy frames before every cut, forever.
         let area = Rect::new(0, 0, 40, 14);
         let mut app = updated(40, 14);
-        let _ = app.handle_key(press(KeyCode::Char('z')));
+        app.drive = Drive::AutoZoom;
 
         let start = Instant::now();
         let step = Duration::from_millis(100);
@@ -1389,9 +1451,8 @@ mod tests {
     fn the_drives_are_exclusive_and_toggle_off() {
         // An orbit reframes home on every parameter change while a dive is
         // descending, so running both would produce neither.
-        let mut app = updated(30, 10);
-        let _ = app.handle_key(press(KeyCode::Char('z')));
-        assert_eq!(app.drive, Drive::AutoZoom);
+        let mut app = launched(30, 10);
+        assert_eq!(app.drive, Drive::AutoZoom, "the shipped default");
         let _ = app.handle_key(press(KeyCode::Char('o')));
         assert_eq!(app.drive, Drive::JuliaOrbit);
         let _ = app.handle_key(press(KeyCode::Char('o')));
@@ -1402,9 +1463,7 @@ mod tests {
     fn cycling_composes_with_a_drive_rather_than_replacing_it() {
         // It changes only the shader, so it can run during a dive.
         let area = Rect::new(0, 0, 30, 10);
-        let mut app = updated(30, 10);
-        let _ = app.handle_key(press(KeyCode::Char('c')));
-        let _ = app.handle_key(press(KeyCode::Char('z')));
+        let mut app = launched(30, 10);
         animate(&mut app, area, 20, Duration::from_millis(50));
         assert!(app.cycling && app.drive == Drive::AutoZoom);
         assert!(app.shader.phase > 0.0, "the palette stopped cycling");
@@ -1413,15 +1472,115 @@ mod tests {
 
     #[test]
     fn a_still_app_does_not_move_on_its_own() {
-        // No drive and no cycling means an idle frame must be identical, or the
-        // renderer would burn the kernel on a static picture forever.
+        // With cycling off and no drive, an idle frame must be identical — or
+        // the renderer would burn the kernel on a static picture forever.
         let area = Rect::new(0, 0, 30, 10);
         let mut app = updated(30, 10);
+        assert!(!app.cycling && app.drive == Drive::Still);
         let cells = app.cells.clone();
         let sampled_for = app.sampled_for;
         animate(&mut app, area, 30, Duration::from_millis(33));
         assert_eq!(app.cells, cells);
         assert_eq!(app.sampled_for, sampled_for);
+    }
+
+    #[test]
+    fn s_cycles_supersampling_and_multiplies_the_lattice() {
+        let area = Rect::new(0, 0, 40, 16);
+        let mut app = updated(40, 16);
+        assert_eq!((app.samples.cols(), app.samples.rows()), (40, 16));
+
+        let _ = app.handle_key(press(KeyCode::Char('s')));
+        app.update(area, Instant::now());
+        assert_eq!(app.shader.supersample, Supersample::X2);
+        assert_eq!((app.samples.cols(), app.samples.rows()), (80, 32));
+        // The cell grid is unchanged — it is the *samples* that multiply.
+        assert_eq!((app.cells.width(), app.cells.height()), (40, 16));
+
+        let _ = app.handle_key(press(KeyCode::Char('s')));
+        app.update(area, Instant::now());
+        assert_eq!((app.samples.cols(), app.samples.rows()), (120, 48));
+
+        let _ = app.handle_key(press(KeyCode::Char('s')));
+        app.update(area, Instant::now());
+        assert_eq!(app.shader.supersample, Supersample::Off, "must wrap");
+    }
+
+    #[test]
+    fn supersampling_does_not_move_the_view() {
+        // Same invariance as the mode toggle, and for the same reason: the
+        // factor multiplies both lattice axes, so the plane region is
+        // untouched. Turning it on should sharpen the picture, not reframe it.
+        let area = Rect::new(0, 0, 60, 20);
+        let mut app = updated(60, 20);
+        for _ in 0..4 {
+            let _ = app.handle_key(press(KeyCode::Char('+')));
+        }
+        app.update(area, Instant::now());
+        let before = app.params.viewport;
+
+        let _ = app.handle_key(press(KeyCode::Char('s')));
+        app.update(area, Instant::now());
+        let after = app.params.viewport;
+
+        assert_eq!(after.centre, before.centre);
+        assert!((after.half_width - before.half_width).abs() < 1e-12);
+        assert!((after.half_height() - before.half_height()).abs() < 1e-12);
+        assert_ne!(after.cols, before.cols, "the lattice should have grown");
+    }
+
+    #[test]
+    fn a_fresh_launch_moves_the_shape_not_just_the_colours() {
+        // What the user actually gets, and the reason the defaults are what
+        // they are: cycling alone moves the colour while the geometry stands
+        // still, which reads as a tinted photograph rather than a live render.
+        let area = Rect::new(0, 0, 50, 18);
+        let mut app = launched(50, 18);
+        assert!(app.cycling, "colour should drift");
+        assert_eq!(app.drive, Drive::AutoZoom, "the shape should move");
+
+        let magnification = app.magnification();
+        let glyphs: Vec<char> = app.cells.cells().map(|c| c.glyph).collect();
+        animate(&mut app, area, 20, Duration::from_millis(50));
+
+        assert!(
+            app.magnification() > magnification,
+            "the view did not descend"
+        );
+        let after: Vec<char> = app.cells.cells().map(|c| c.glyph).collect();
+        assert_ne!(glyphs, after, "the shape did not change, only the colour");
+    }
+
+    #[test]
+    fn navigating_takes_control_from_the_automatic_drive() {
+        // Panning while the dive descends would be a fight the user cannot
+        // win: the next frame moves the view back. Any navigation key stops it.
+        for code in [
+            KeyCode::Char('h'),
+            KeyCode::Char('l'),
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Left,
+            KeyCode::Char('+'),
+            KeyCode::Char('-'),
+            KeyCode::Char('r'),
+        ] {
+            let mut app = launched(30, 12);
+            assert_eq!(app.drive, Drive::AutoZoom);
+            let _ = app.handle_key(press(code));
+            assert_eq!(app.drive, Drive::Still, "{code:?} did not take control");
+            // Cycling is left alone: it does not move the view.
+            assert!(app.cycling, "{code:?} stopped the palette too");
+        }
+    }
+
+    #[test]
+    fn a_manual_pan_actually_moves_after_taking_control() {
+        // Taking control must not swallow the keypress that took it.
+        let mut app = launched(40, 14);
+        let before = app.params.viewport.centre.re;
+        let _ = app.handle_key(press(KeyCode::Char('l')));
+        assert!(app.params.viewport.centre.re > before, "the pan was lost");
     }
 
     #[test]
@@ -1449,6 +1608,7 @@ mod tests {
             KeyCode::Char('p'),
             KeyCode::Char('m'),
             KeyCode::Char('i'),
+            KeyCode::Char('s'),
             KeyCode::Char('c'),
             KeyCode::Char('o'),
             KeyCode::Char('z'),
