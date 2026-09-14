@@ -10,7 +10,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::clock::Clock;
 use crate::error::Result;
@@ -106,11 +106,19 @@ const ORBIT_RADIUS: f64 = 0.7;
 
 /// How much the auto-zoom shrinks the view per second.
 ///
-/// Applied geometrically — `factor.powf(dt)`, never `factor * dt` — so the
-/// dive advances at the same rate in *plane* terms whatever the frame rate. On
-/// a slow machine it takes the same wall-clock time in fewer, chunkier frames
-/// rather than slowing down, which matters when the mode runs unattended.
-const ZOOM_PER_SECOND: f64 = 0.55;
+/// `1/1.2`, so the magnification grows about 1.2× a second and a full dive from
+/// the whole set to the `f64` wall takes roughly two and a half minutes. The
+/// first version was 0.55 — nearly 1.8× a second, a complete dive in under a
+/// minute — which is a fly-through rather than something you can watch: detail
+/// resolves and is gone before the eye settles on it. This is an unattended
+/// display, so the rate wants to be slow enough to look at.
+///
+/// Applied geometrically — `factor.powf(dt)`, never `factor * dt` — so the dive
+/// advances at the same rate in *plane* terms whatever the frame rate. On a
+/// slow machine it takes the same wall-clock time in fewer, chunkier frames
+/// rather than slowing down, which matters precisely because nobody is watching
+/// the frame counter.
+const ZOOM_PER_SECOND: f64 = 1.0 / 1.2;
 
 /// How far the dive descends before choosing a fresh target.
 ///
@@ -172,11 +180,14 @@ pub struct App {
     palette_index: usize,
     /// Iteration limit bias, in doublings from the viewport's suggestion.
     limit_bias: i32,
-    /// Whether the status line is shown.
+    /// Whether the status bar is shown.
     ///
-    /// Off by default so the fractal gets the whole terminal, and so the render
-    /// snapshots capture the picture rather than a line of changing numbers.
+    /// On by default: it is where the controls are, and a renderer whose
+    /// bindings are invisible is one nobody finds the bindings of. `i` hides it
+    /// for a full-screen view.
     hud: bool,
+    /// Whether the help overlay is shown.
+    help: bool,
     /// Animation time.
     clock: Clock,
     /// Whether the palette drifts on its own.
@@ -231,7 +242,8 @@ impl App {
             cells: Grid::new(0, 0),
             palette_index: 0,
             limit_bias: 0,
-            hud: false,
+            hud: true,
+            help: false,
             clock: Clock::new(),
             // Both on by default, because "realtime fractal renderer" is the
             // whole premise and a static first frame does not deliver it.
@@ -325,6 +337,7 @@ impl App {
             (KeyCode::Char('m' | 'M'), _) => self.next_mode(),
             (KeyCode::Char('s' | 'S'), _) => self.next_supersample(),
             (KeyCode::Char('i' | 'I'), _) => self.hud = !self.hud,
+            (KeyCode::Char('?'), _) => self.help = !self.help,
             (KeyCode::Char('c'), _) => self.cycling = !self.cycling,
             (KeyCode::Char('o' | 'O'), _) => self.toggle_drive(Drive::JuliaOrbit),
             (KeyCode::Char('z' | 'Z'), _) => self.toggle_drive(Drive::AutoZoom),
@@ -534,9 +547,10 @@ impl App {
         let dt = self.clock.tick(now);
         self.advance(dt);
 
+        let canvas = self.canvas_area(area);
         let (cols, rows) = self
             .shader
-            .lattice(usize::from(area.width), usize::from(area.height));
+            .lattice(usize::from(canvas.width), usize::from(canvas.height));
 
         if self.params.viewport.cols != cols || self.params.viewport.rows != rows {
             self.params
@@ -581,87 +595,131 @@ impl App {
     /// why the cost is not here.
     pub fn draw(&self, frame: &mut Frame<'_>) {
         let area = frame.area();
-        frame.render_widget(&self.cells, area);
+        frame.render_widget(&self.cells, self.canvas_area(area));
 
-        if self.hud && area.height > 0 {
-            // Overlaid on the bottom row rather than given a row of its own:
-            // stealing a row would change the sample lattice every time the
-            // status line was toggled, and re-sample for a caption.
-            let row = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+        if let Some(row) = self.bar_area(area) {
             // `Clear` first: a `Paragraph`'s style recolours the row but only
-            // overwrites the cells its text occupies, so without this the
-            // fractal's glyphs show through to the right of the status text —
-            // which reads as corruption rather than as an overlay.
+            // overwrites the cells its text occupies, so without this whatever
+            // was underneath shows through to the right of the text — which
+            // reads as corruption rather than as a bar.
             frame.render_widget(Clear, row);
-            frame.render_widget(self.status_line(), row);
+            frame.render_widget(self.status_bar(row.width), row);
+        }
+
+        if self.help {
+            let overlay = centred(area, 46, 16);
+            frame.render_widget(Clear, overlay);
+            frame.render_widget(help_overlay(), overlay);
         }
     }
 
-    /// The status line: what the renderer is currently doing.
+    /// The part of the terminal the fractal is drawn into.
     ///
-    /// Cheap, and the point of it is that a regression gets noticed while using
-    /// the thing rather than three weeks later. The magnification and limit are
-    /// what to cross-check against `--headless` at the same size and depth; if
-    /// they diverge, the event loop is costing something the benchmark cannot
-    /// see.
-    fn status_line(&self) -> Paragraph<'static> {
-        let viewport = &self.params.viewport;
-        let dim = Style::default().fg(Color::Rgb(0x88, 0x88, 0x88));
+    /// The bar takes a row rather than being overlaid on one, so nothing shows
+    /// through behind it and the sample lattice matches what is visible.
+    /// Toggling the bar therefore re-samples — which is the honest cost of the
+    /// picture actually changing size.
+    fn canvas_area(&self, area: Rect) -> Rect {
+        match self.bar_area(area) {
+            Some(_) => Rect {
+                height: area.height - 1,
+                ..area
+            },
+            None => area,
+        }
+    }
+
+    /// Where the status bar goes, if there is room for it.
+    ///
+    /// `None` in a terminal one row tall: a bar that consumed the only row
+    /// would leave nowhere for the fractal, which is the wrong trade.
+    fn bar_area(&self, area: Rect) -> Option<Rect> {
+        (self.hud && area.height > 1)
+            .then(|| Rect::new(area.x, area.y + area.height - 1, area.width, 1))
+    }
+
+    /// The status bar: what the renderer is doing, and how to drive it.
+    ///
+    /// Both halves matter. The state is how a regression gets noticed while
+    /// using the thing rather than three weeks later — cross-check the
+    /// magnification and limit against `--headless` at the same size and depth.
+    /// The controls are there because a renderer whose bindings are invisible
+    /// is one nobody finds the bindings of.
+    fn status_bar(&self, width: u16) -> Paragraph<'static> {
+        let dim = Style::default().fg(Color::Rgb(0x80, 0x80, 0x88));
         let bright = Style::default()
             .fg(Color::Rgb(0xe8, 0xe8, 0xe8))
             .add_modifier(Modifier::BOLD);
+        let motion_style = Style::default().fg(Color::Rgb(0x60, 0xc0, 0x90));
+        let key = Style::default().fg(Color::Rgb(0xc8, 0xb0, 0x60));
 
-        let mut spans = vec![
-            Span::styled(self.params.kernel.name().to_owned(), bright),
-            Span::styled("  ", dim),
-            Span::styled(self.shader.mode.name().to_owned(), dim),
-            Span::styled("  ", dim),
-            Span::styled(self.shader.palette.name().to_owned(), dim),
-            Span::styled(
-                if self.shader.supersample == Supersample::Off {
-                    String::new()
-                } else {
-                    format!("  ss{}", self.shader.supersample.name())
-                },
-                dim,
-            ),
-            Span::styled(format!("  {:.3e}x  ", viewport.magnification()), dim),
-            Span::styled(format!("iter {}", self.params.limit), dim),
-        ];
+        let state = self.state_text();
+        let motion = self.motion_text();
+        // The hints get whatever the state leaves, with two spaces between.
+        let used = state.chars().count() + motion.chars().count() + 2;
+        let hints = hints_for(usize::from(width).saturating_sub(used + 2));
 
-        if self.drive != Drive::Still || self.cycling || self.clock.is_paused() {
-            let mut motion = String::from("  ");
-            if self.clock.is_paused() {
-                motion.push_str("paused ");
-            }
-            if self.drive != Drive::Still {
-                motion.push_str(self.drive.name());
-                motion.push(' ');
-            }
-            if self.cycling {
-                motion.push_str("cycling");
-            }
-            spans.push(Span::styled(
-                motion.trim_end().to_owned(),
-                Style::default().fg(Color::Rgb(0x60, 0xc0, 0x90)),
-            ));
+        let mut spans = vec![Span::styled(state, bright)];
+        if !motion.is_empty() {
+            spans.push(Span::styled(format!("  {motion}"), motion_style));
+        }
+        if !hints.is_empty() {
+            // Right-aligned by padding, so the two halves do not jiggle against
+            // each other as the magnification's digits change.
+            let pad = usize::from(width).saturating_sub(used + hints.chars().count());
+            spans.push(Span::styled(" ".repeat(pad), dim));
+            spans.push(Span::styled(hints.to_owned(), key));
         }
 
-        // Only shown when it means something. At `Ample` the user does not need
-        // to know the precision wall exists.
-        match viewport.precision() {
-            Precision::Ample => {}
-            Precision::Marginal => spans.push(Span::styled(
-                "  precision: marginal".to_owned(),
-                Style::default().fg(Color::Rgb(0xd0, 0xa0, 0x30)),
-            )),
-            Precision::Exhausted => spans.push(Span::styled(
-                "  precision: exhausted (max zoom)".to_owned(),
-                Style::default().fg(Color::Rgb(0xd0, 0x50, 0x40)),
-            )),
-        }
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(0x14, 0x14, 0x1c)))
+    }
 
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(0x10, 0x10, 0x18)))
+    /// The left half: what is being rendered.
+    fn state_text(&self) -> String {
+        let viewport = &self.params.viewport;
+        let mut text = format!(
+            "{}  {}  {}",
+            self.params.kernel.name(),
+            self.shader.mode.name(),
+            self.shader.palette.name()
+        );
+        if self.shader.supersample != Supersample::Off {
+            text.push_str(&format!("  ss{}", self.shader.supersample.name()));
+        }
+        text.push_str(&format!(
+            "  {:.3e}x  iter {}",
+            viewport.magnification(),
+            self.params.limit
+        ));
+        // Only when it means something: at `Ample` there is nothing to warn
+        // about, and a permanent warning is one nobody reads.
+        //
+        // "max zoom" keys off the clamp rather than off `Exhausted`, because
+        // `Exhausted` is unreachable by zooming: the clamp refuses to go below
+        // `min_half_width`, which sits exactly at the `Marginal` boundary. An
+        // earlier version tested for `Exhausted` here and so never said
+        // anything at the one moment the user most needs told.
+        if viewport.half_width <= viewport.min_half_width() {
+            text.push_str("  max zoom");
+        } else if viewport.precision() != Precision::Ample {
+            text.push_str("  precision: marginal");
+        }
+        text
+    }
+
+    /// What is currently moving, if anything.
+    fn motion_text(&self) -> String {
+        let mut parts = Vec::new();
+        if self.clock.is_paused() {
+            parts.push("paused");
+        }
+        if self.drive != Drive::Still {
+            parts.push(self.drive.name());
+        }
+        if self.cycling {
+            parts.push("cycling");
+        }
+        parts.join(" ")
     }
 
     /// Own the terminal until the user quits.
@@ -712,6 +770,76 @@ impl App {
                 }
             }
         }
+    }
+}
+
+/// The control hints that fit in `width` columns.
+///
+/// Tiered rather than truncated mid-word: a hint cut off halfway is worse than
+/// one that is absent, because it reads as a rendering bug. Each tier is a
+/// complete, useful set, and the shortest still points at the full list.
+fn hints_for(width: usize) -> &'static str {
+    const TIERS: &[&str] = &[
+        "hjkl pan  +/- zoom  z dive  p palette  m mode  s ss  ? help",
+        "hjkl  +/-  z dive  p palette  ? help",
+        "hjkl  +/-  z  p  ? help",
+        "? help",
+    ];
+    TIERS
+        .iter()
+        .copied()
+        .find(|tier| tier.chars().count() <= width)
+        .unwrap_or("")
+}
+
+/// The full binding list.
+fn help_overlay() -> Paragraph<'static> {
+    let key = Style::default().fg(Color::Rgb(0xc8, 0xb0, 0x60));
+    let text = Style::default().fg(Color::Rgb(0xd8, 0xd8, 0xd8));
+    let row = |k: &'static str, what: &'static str| {
+        Line::from(vec![
+            Span::styled(format!(" {k:<12}"), key),
+            Span::styled(what, text),
+        ])
+    };
+
+    Paragraph::new(vec![
+        row("h j k l", "pan (also arrows)"),
+        row("+ / -", "zoom in / out"),
+        row(". / ,", "iteration limit"),
+        row("r", "reset the view"),
+        row("Tab / f", "next fractal"),
+        row("p", "next palette"),
+        row("m", "glyph / half-block"),
+        row("s", "supersampling 1x/2x/3x"),
+        row("z", "auto-zoom (dives forever)"),
+        row("o", "Julia parameter orbit"),
+        row("c", "palette cycling"),
+        row("Space", "pause motion"),
+        row("i", "status bar"),
+        row("q / Esc", "quit"),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" controls ")
+            .style(Style::default().bg(Color::Rgb(0x14, 0x14, 0x1c))),
+    )
+}
+
+/// A `width` x `height` rectangle centred in `area`, clamped to fit.
+///
+/// Clamped rather than asserted: a terminal smaller than the overlay is a
+/// normal thing to encounter, and the box should shrink rather than the
+/// arithmetic underflow.
+fn centred(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
     }
 }
 
@@ -815,9 +943,10 @@ mod tests {
 
     #[test]
     fn updating_fills_the_grid_to_the_terminals_size() {
+        // One row shorter than the terminal: the status bar takes it.
         let app = updated(60, 20);
-        assert_eq!((app.cells.width(), app.cells.height()), (60, 20));
-        assert_eq!((app.samples.cols(), app.samples.rows()), (60, 20));
+        assert_eq!((app.cells.width(), app.cells.height()), (60, 19));
+        assert_eq!((app.samples.cols(), app.samples.rows()), (60, 19));
     }
 
     #[test]
@@ -861,7 +990,8 @@ mod tests {
         let before = app.sampled_for;
         app.update(Rect::new(0, 0, 41, 15), Instant::now());
         assert_ne!(app.sampled_for, before, "a resize must re-sample");
-        assert_eq!((app.cells.width(), app.cells.height()), (41, 15));
+        // One row goes to the status bar.
+        assert_eq!((app.cells.width(), app.cells.height()), (41, 14));
     }
 
     #[test]
@@ -1056,7 +1186,7 @@ mod tests {
         let _ = app.handle_key(press(KeyCode::Char('.')));
         let _ = app.handle_key(press(KeyCode::Char('r')));
 
-        let home = Viewport::home(60, 20, app.params.viewport.sample_aspect);
+        let home = Viewport::home(60, 19, app.params.viewport.sample_aspect);
         assert_eq!(app.params.viewport, home);
         assert_eq!(app.limit_bias, 0);
         assert_eq!(app.palette_name(), palette, "reset changed the palette");
@@ -1149,13 +1279,13 @@ mod tests {
             app.cells.cells().all(|c| c.glyph == '▀'),
             "half-block should be one glyph"
         );
-        // Twice the samples, same cells.
-        assert_eq!((app.cells.width(), app.cells.height()), (40, 16));
-        assert_eq!((app.samples.cols(), app.samples.rows()), (40, 32));
+        // Twice the samples, same cells. 15 rows, not 16: the bar takes one.
+        assert_eq!((app.cells.width(), app.cells.height()), (40, 15));
+        assert_eq!((app.samples.cols(), app.samples.rows()), (40, 30));
 
         let _ = app.handle_key(press(KeyCode::Char('m')));
         app.update(Rect::new(0, 0, 40, 16), Instant::now());
-        assert_eq!((app.samples.cols(), app.samples.rows()), (40, 16));
+        assert_eq!((app.samples.cols(), app.samples.rows()), (40, 15));
     }
 
     #[test]
@@ -1223,13 +1353,131 @@ mod tests {
     }
 
     #[test]
-    fn i_toggles_the_status_line_and_it_is_off_by_default() {
+    fn the_status_bar_is_shown_by_default_and_i_hides_it() {
+        // On by default because it is where the controls are, and bindings
+        // nobody can see are bindings nobody finds.
         let mut app = updated(40, 12);
-        assert!(!app.hud, "the status line must start hidden");
-        let _ = app.handle_key(press(KeyCode::Char('i')));
-        assert!(app.hud);
+        assert!(app.hud, "the status bar should start visible");
         let _ = app.handle_key(press(KeyCode::Char('i')));
         assert!(!app.hud);
+        let _ = app.handle_key(press(KeyCode::Char('i')));
+        assert!(app.hud);
+    }
+
+    #[test]
+    fn hiding_the_bar_gives_its_row_back_to_the_fractal() {
+        let area = Rect::new(0, 0, 40, 12);
+        let mut app = updated(40, 12);
+        assert_eq!(app.cells.height(), 11);
+
+        let _ = app.handle_key(press(KeyCode::Char('i')));
+        app.update(area, Instant::now());
+        assert_eq!(app.cells.height(), 12, "the row was not returned");
+    }
+
+    #[test]
+    fn the_bar_is_dropped_rather_than_taking_the_only_row() {
+        // In a one-row terminal a bar would leave nowhere for the fractal.
+        let app = updated(20, 1);
+        assert_eq!(app.bar_area(Rect::new(0, 0, 20, 1)), None);
+        assert_eq!(app.canvas_area(Rect::new(0, 0, 20, 1)).height, 1);
+    }
+
+    #[test]
+    fn the_status_bar_shows_the_state_and_the_controls() {
+        let app = updated(100, 20);
+        let state = app.state_text();
+        assert!(state.contains("mandelbrot"), "{state}");
+        assert!(state.contains("glyph"), "{state}");
+        assert!(state.contains("iter"), "{state}");
+        // And the hints are there when there is room.
+        assert!(hints_for(80).contains("? help"));
+        assert!(hints_for(80).contains("hjkl"));
+    }
+
+    #[test]
+    fn the_hints_degrade_by_tier_rather_than_truncating_mid_word() {
+        // A hint cut off halfway reads as a rendering bug, so each tier is a
+        // complete set and the narrowest still points at the full list.
+        let mut previous = usize::MAX;
+        for width in [80, 50, 30, 10, 6, 0] {
+            let hint = hints_for(width);
+            assert!(hint.chars().count() <= width, "width {width} got {hint:?}");
+            assert!(hint.chars().count() <= previous, "tiers must shrink");
+            previous = hint.chars().count();
+            if !hint.is_empty() {
+                assert!(hint.contains("? help"), "width {width}: {hint:?}");
+                assert!(!hint.ends_with(' '), "width {width}: trailing space");
+            }
+        }
+        assert_eq!(hints_for(0), "", "nothing fits in no columns");
+    }
+
+    #[test]
+    fn the_state_only_mentions_precision_when_it_is_short() {
+        let app = updated(60, 20);
+        assert!(!app.state_text().contains("precision"));
+        assert!(!app.state_text().contains("max zoom"));
+
+        let mut deep = updated(60, 20);
+        for _ in 0..400 {
+            let _ = deep.handle_key(press(KeyCode::Char('+')));
+        }
+        deep.update(Rect::new(0, 0, 60, 20), Instant::now());
+        assert!(
+            deep.state_text().contains("max zoom"),
+            "{}",
+            deep.state_text()
+        );
+    }
+
+    #[test]
+    fn the_motion_text_names_only_what_is_running() {
+        let app = updated(30, 10);
+        assert_eq!(app.motion_text(), "", "nothing is moving");
+
+        let mut live = launched(30, 10);
+        assert_eq!(live.motion_text(), "auto-zoom cycling");
+        let _ = live.handle_key(press(KeyCode::Char(' ')));
+        assert!(live.motion_text().starts_with("paused"));
+    }
+
+    #[test]
+    fn question_mark_toggles_the_help_overlay() {
+        let mut app = updated(40, 14);
+        assert!(!app.help, "help should start closed");
+        let _ = app.handle_key(press(KeyCode::Char('?')));
+        assert!(app.help);
+        let _ = app.handle_key(press(KeyCode::Char('?')));
+        assert!(!app.help);
+    }
+
+    #[test]
+    fn the_help_overlay_is_clamped_into_a_small_terminal() {
+        // Smaller than the box is normal; it must shrink rather than underflow.
+        let area = Rect::new(0, 0, 10, 4);
+        let overlay = centred(area, 46, 16);
+        assert_eq!((overlay.width, overlay.height), (10, 4));
+        assert_eq!((overlay.x, overlay.y), (0, 0));
+    }
+
+    #[test]
+    fn the_help_overlay_is_centred_in_a_large_terminal() {
+        let overlay = centred(Rect::new(0, 0, 100, 40), 46, 16);
+        assert_eq!((overlay.width, overlay.height), (46, 16));
+        assert_eq!((overlay.x, overlay.y), (27, 12));
+    }
+
+    #[test]
+    fn showing_help_does_not_disturb_the_render() {
+        // It is an overlay, not a layout change: the sample grid must be
+        // untouched, or opening help would re-render the fractal.
+        let area = Rect::new(0, 0, 50, 18);
+        let mut app = updated(50, 18);
+        let samples = app.samples.clone();
+        let _ = app.handle_key(press(KeyCode::Char('?')));
+        app.update(area, Instant::now());
+        assert_eq!(app.samples, samples);
     }
 
     #[test]
@@ -1252,16 +1500,16 @@ mod tests {
     }
 
     #[test]
-    fn toggling_the_status_line_never_re_samples() {
-        // It is overlaid on the bottom row rather than given a row of its own,
-        // precisely so that showing it does not change the sample lattice.
+    fn toggling_the_bar_re_samples_because_the_picture_changes_size() {
+        // The bar takes a row rather than being overlaid, so the fractal really
+        // does get bigger when it is hidden. Re-sampling is the honest cost of
+        // that, and asserting it here stops anyone "optimising" the toggle by
+        // overlaying the bar again — which would put the fractal behind it.
         let mut app = updated(50, 18);
         let before = app.sampled_for;
-        let samples = app.samples.clone();
         let _ = app.handle_key(press(KeyCode::Char('i')));
         app.update(Rect::new(0, 0, 50, 18), Instant::now());
-        assert_eq!(app.sampled_for, before);
-        assert_eq!(app.samples, samples);
+        assert_ne!(app.sampled_for, before);
     }
 
     #[test]
@@ -1398,13 +1646,18 @@ mod tests {
         let mut app = updated(50, 18);
         app.drive = Drive::AutoZoom;
 
+        // Long enough for at least two complete dives: at ~1.2x magnification
+        // a second, one dive to the wall takes about three minutes, so this is
+        // roughly seven minutes of simulated time. Tied to the rate rather than
+        // a round number, because a slower dive would otherwise silently stop
+        // testing the reset at all.
         let start = Instant::now();
         let step = Duration::from_millis(100);
         let mut resets = 0;
         let mut previous = app.magnification();
         let mut featureless = 0;
 
-        for i in 0..=1_200 {
+        for i in 0..=4_200 {
             app.update(area, start + step * i);
             if app.magnification() < previous {
                 resets += 1;
@@ -1416,10 +1669,13 @@ mod tests {
             }
         }
 
-        assert!(resets >= 2, "only {resets} resets in two minutes of diving");
+        assert!(
+            resets >= 2,
+            "only {resets} resets in seven minutes of diving"
+        );
         assert!(app.magnification() > 1.0, "it ended up stalled at home");
         assert!(
-            featureless < 60,
+            featureless < 200,
             "{featureless} frames were featureless outside a re-target"
         );
     }
@@ -1434,8 +1690,11 @@ mod tests {
 
         let start = Instant::now();
         let step = Duration::from_millis(100);
+        // Two minutes of simulated diving, which at ~1.2x a second reaches
+        // about 1e9 — deep enough to prove it descends without reaching the
+        // clamp this test exists to check it avoids.
         let mut deepest = 1.0_f64;
-        for i in 0..=600 {
+        for i in 0..=1_400 {
             app.update(area, start + step * i);
             deepest = deepest.max(app.magnification());
             assert_ne!(
@@ -1488,18 +1747,19 @@ mod tests {
     fn s_cycles_supersampling_and_multiplies_the_lattice() {
         let area = Rect::new(0, 0, 40, 16);
         let mut app = updated(40, 16);
-        assert_eq!((app.samples.cols(), app.samples.rows()), (40, 16));
+        // 15 rows of fractal; the bar has the sixteenth.
+        assert_eq!((app.samples.cols(), app.samples.rows()), (40, 15));
 
         let _ = app.handle_key(press(KeyCode::Char('s')));
         app.update(area, Instant::now());
         assert_eq!(app.shader.supersample, Supersample::X2);
-        assert_eq!((app.samples.cols(), app.samples.rows()), (80, 32));
+        assert_eq!((app.samples.cols(), app.samples.rows()), (80, 30));
         // The cell grid is unchanged — it is the *samples* that multiply.
-        assert_eq!((app.cells.width(), app.cells.height()), (40, 16));
+        assert_eq!((app.cells.width(), app.cells.height()), (40, 15));
 
         let _ = app.handle_key(press(KeyCode::Char('s')));
         app.update(area, Instant::now());
-        assert_eq!((app.samples.cols(), app.samples.rows()), (120, 48));
+        assert_eq!((app.samples.cols(), app.samples.rows()), (120, 45));
 
         let _ = app.handle_key(press(KeyCode::Char('s')));
         app.update(area, Instant::now());
@@ -1609,6 +1869,7 @@ mod tests {
             KeyCode::Char('m'),
             KeyCode::Char('i'),
             KeyCode::Char('s'),
+            KeyCode::Char('?'),
             KeyCode::Char('c'),
             KeyCode::Char('o'),
             KeyCode::Char('z'),

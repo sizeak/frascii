@@ -21,6 +21,7 @@ use std::time::Instant;
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
 use crate::App;
@@ -33,6 +34,11 @@ use crate::App;
 /// property that makes them worth having.
 fn frame(width: u16, height: u16) -> String {
     let mut app = App::new();
+    // The status bar is hidden for these: it carries a magnification and an
+    // iteration count, so a snapshot including it would fail on any change to
+    // the defaults rather than on a change to the *rendering*, which is what
+    // these exist to catch.
+    let _ = app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
     app.update(Rect::new(0, 0, width, height), Instant::now());
 
     let mut terminal = Terminal::new(TestBackend::new(width, height))

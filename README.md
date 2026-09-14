@@ -96,7 +96,8 @@ tail -f target/frascii.log      # ... in another terminal
 | `p` | Next palette |
 | `m` | Glyph / half-block rendering |
 | `s` | Supersampling: 1× / 2× / 3× |
-| `i` | Status line |
+| `?` | Full control list |
+| `i` | Status bar |
 | `c` | Palette cycling on/off |
 | `o` | Julia parameter orbit |
 | `z` | Unattended auto-zoom |
@@ -118,6 +119,8 @@ It costs `k²` times the samples, measured at 1e6 magnification on a 20,000-pixe
 `z` dives forever: descend toward the boundary, re-aim every eight-fold magnification, and on reaching the limit of `f64` reset to the whole set and pick somewhere new. It stops one notch *short* of the hard precision clamp — diving all the way would show several visibly mushy frames before every cut.
 
 Every rate is per second and applied per frame, and zoom is geometric in elapsed time, so a dive covers the same ground in the same wall-clock time on a slow machine — in fewer, chunkier frames rather than more slowly.
+
+A status bar sits at the bottom showing what is being rendered — fractal, mode, palette, magnification, iteration limit, what is moving — and the common controls. `?` opens the full list; `i` hides the bar for a full-screen view. The hints shrink by tier as the terminal narrows rather than being cut off mid-word, and the narrowest still points at `? help`.
 
 **Pan before you zoom.** Zoom is about the centre of the view, and the home view is centred on `-0.75`, which is *inside* the set — so pressing `+` from a fresh start dives into the solid interior and the screen goes blank. Pan to some boundary filigree first. Scroll-to-cursor would fix this properly and needs mouse capture, which is not wired up yet; the unattended auto-zoom mode will use core's `boundary_target` to pick somewhere worth diving into.
 
