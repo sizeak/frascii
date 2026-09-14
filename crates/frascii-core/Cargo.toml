@@ -16,9 +16,12 @@ rust-version.workspace = true
 # this crate's output and belongs here. It is a grid of glyphs and colours
 # that does not.
 #
-# A numeric or parallelism dependency could legitimately land here one day. A
-# presentation one never can — that is the whole boundary.
+# `rayon` is the parallelism dependency that comment anticipated: the sampler
+# owns the decision to go wide, precisely so the kernels do not have to know
+# about threads. It is the only entry here, and a presentational one never can
+# be — that is the whole boundary.
 [dependencies]
+rayon.workspace = true
 
 [lints]
 workspace = true

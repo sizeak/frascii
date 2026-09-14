@@ -33,6 +33,55 @@ pub(crate) struct Cli {
     /// Increase log verbosity (-v debug, -vv trace)
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub(crate) verbose: u8,
+
+    // Benchmark the renderer with no terminal involved. Grouped under
+    // `Headless` in the help so the interactive flags above stay legible; all
+    // of them require `--headless`, which clap enforces so a run that looks
+    // like a benchmark cannot silently open a TUI instead.
+    /// Render frames without a terminal and report timing
+    #[arg(long)]
+    pub(crate) headless: bool,
+
+    /// Frames to render
+    #[arg(long, value_name = "N", default_value_t = 60, requires = "headless")]
+    pub(crate) frames: u32,
+
+    /// Samples across
+    #[arg(long, value_name = "N", default_value_t = 200, requires = "headless")]
+    pub(crate) cols: usize,
+
+    /// Samples down
+    #[arg(long, value_name = "N", default_value_t = 100, requires = "headless")]
+    pub(crate) rows: usize,
+
+    /// Iteration limit (default: scaled to the magnification)
+    #[arg(long, value_name = "N", requires = "headless")]
+    pub(crate) limit: Option<u32>,
+
+    /// Magnification to render at
+    #[arg(long, value_name = "X", default_value_t = 1.0, requires = "headless")]
+    pub(crate) magnification: f64,
+
+    /// Which fractal to render
+    #[arg(long, value_enum, default_value_t = FractalArg::Mandelbrot, requires = "headless")]
+    pub(crate) fractal: FractalArg,
+
+    /// Write the last frame as a binary PPM
+    #[arg(long, value_name = "FILE", requires = "headless")]
+    pub(crate) ppm: Option<PathBuf>,
+}
+
+/// The fractal a headless run should render.
+///
+/// Defined here rather than beside the renderer so `headless.rs` needs no
+/// argument parser: it is a second frontend, and a frontend that had to depend
+/// on the CLI to be callable would not be much of one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum FractalArg {
+    /// The Mandelbrot set.
+    Mandelbrot,
+    /// The default Julia set.
+    Julia,
 }
 
 /// The `tracing` filter directive for a `-v` count.

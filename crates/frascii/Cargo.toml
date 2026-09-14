@@ -18,6 +18,9 @@ categories = ["command-line-utilities", "visualization"]
 # name from `--version`.
 [dependencies]
 clap.workspace = true
+# Both, and the pairing is the point: `headless.rs` uses core and never the
+# frontend, so a build that succeeds is evidence the layering holds.
+frascii-core.workspace = true
 frascii-tui.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

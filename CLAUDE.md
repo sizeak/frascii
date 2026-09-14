@@ -88,13 +88,10 @@ Two more rules with teeth:
 
 Named so nobody has to guess whether it was forgotten.
 
-In **`frascii-core`** — a second frontend needs each of these unchanged:
+In **`frascii-core`**:
 
-- which fractals exist, and how their parameters are expressed
-- the plane↔sample-index mapping, with pixel aspect ratio as a parameter
-- the sampler that drives a kernel over a region, and its parallelism. The kernels themselves stay free of a thread pool, so the sampler owns that decision
 - supersampling, if any
-- **a headless mode**: render N frames of a viewport to a grid and report timing. [Performance](#performance) says to measure under `--release`, and today nothing *can* measure — this is the gap. It doubles as the smallest possible second frontend, which is what would prove the `core`/`tui` boundary actually holds
+- more fractals beyond Mandelbrot and Julia (the `Fractal` trait is the seam)
 
 In **`frascii-tui`** — presentation and dispatch:
 
@@ -105,6 +102,10 @@ In **`frascii-tui`** — presentation and dispatch:
 - terminal colour-capability detection. It belongs *upstream* of `to_colour`, choosing which colour is produced — not in a per-cell conversion that runs tens of thousands of times a frame
 
 `App::draw` renders a splash frame. It is a bootstrap stand-in, not a start screen: the real render path replaces it.
+
+### Already designed
+
+`frascii-core` now holds the kernels (`Fractal`, `Mandelbrot`, `Julia`), the plane↔sample mapping (`Viewport`, with `pixel_aspect` as the frontend's only geometric input), the sampler (`Sampler`/`CpuSampler`, rayon across rows), and the search for somewhere worth zooming (`boundary_target`, `interior_fraction`). The headless benchmark landed in `crates/frascii/src/headless.rs` — in the *binary*, because writing a file is host-bound I/O that core forbids, and because a second consumer of core that links no frontend is compile-time proof the boundary holds.
 
 ## Coding conventions
 
@@ -131,6 +132,19 @@ The interactive loop is the product, so its cost is a correctness concern rather
 
 - `[profile.dev]` sets `opt-level = 1` for the workspace and `3` for dependencies. Without it `cargo run` renders a slideshow and the first instinct is to blame the algorithm rather than the profile.
 - **Even so, make frame-rate observations under `--release`.** The dev profile keeps debug assertions, and `opt-level = 1` is not what fat LTO produces.
+
+Measured with `frascii --headless` on a Ryzen 9 7940HS (release, 20,000 samples/frame):
+
+| view | limit | mean frame | fps |
+|---|---|---|---|
+| home | 300 | 110µs | 9,100 |
+| Julia, home | 300 | 336µs | 3,000 |
+| 1e6 magnification | 2,691 | 5.27ms | 190 |
+| 1e10 magnification | 4,286 | 6.59ms | 152 |
+
+So the 30fps budget is met with roughly 5× headroom in the worst case, on the CPU, with no SIMD and no GPU. That answers the question the staging was ordered to answer first, and it is why the `Sampler` trait has exactly one implementation.
+
+**A benchmark must report what it rendered.** The first version of `--headless` zoomed straight in on the home centre, which sits *inside* the set, and produced a 100%-interior frame that the cardioid shortcut answers instantly — it claimed 16,198 fps where the real figure at that depth is 190. It now dives via `boundary_target` and prints the interior fraction, warning when a frame is not representative. Any future backend comparison has to keep that, or it will measure the shortcut and call it a speedup.
 
 ## Testing
 

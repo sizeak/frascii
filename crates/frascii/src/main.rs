@@ -6,6 +6,7 @@
 //! the binary, so logic that lands here is logic that stops being covered.
 
 mod cli_args;
+mod headless;
 
 use std::fs::File;
 use std::process::ExitCode;
@@ -13,7 +14,8 @@ use std::process::ExitCode;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use cli_args::{Cli, log_directive};
+use cli_args::{Cli, FractalArg, log_directive};
+use headless::{Options, Which};
 
 /// The binary's name, as users invoke it.
 ///
@@ -31,11 +33,46 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    if cli.headless {
+        return run_headless(&cli);
+    }
+
     match frascii_tui::run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // The terminal is already restored by the time this runs (see
             // `frascii_tui::run`), so stderr is safe to write to here.
+            eprintln!("{NAME}: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Render frames with no terminal and print what it measured.
+///
+/// Deliberately not routed through `frascii_tui`: this path exists to answer
+/// "is the sampler fast enough" and to be the second consumer of
+/// `frascii-core`, so involving the frontend would defeat both purposes.
+fn run_headless(cli: &Cli) -> ExitCode {
+    let options = Options {
+        cols: cli.cols,
+        rows: cli.rows,
+        frames: cli.frames,
+        limit: cli.limit,
+        magnification: cli.magnification,
+        which: match cli.fractal {
+            FractalArg::Mandelbrot => Which::Mandelbrot,
+            FractalArg::Julia => Which::Julia,
+        },
+        ppm: cli.ppm.clone(),
+    };
+
+    match headless::run(&options) {
+        Ok(report) => {
+            print!("{}", report.summary("cpu"));
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
             eprintln!("{NAME}: {error}");
             ExitCode::FAILURE
         }

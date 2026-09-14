@@ -30,11 +30,35 @@ cargo run --release
 frascii [OPTIONS]
 
 Options:
-      --log <FILE>  Write logs to FILE
-  -v, --verbose...  Increase log verbosity (-v debug, -vv trace)
-  -h, --help        Print help
-  -V, --version     Print version
+      --log <FILE>         Write logs to FILE
+  -v, --verbose...         Increase log verbosity (-v debug, -vv trace)
+      --headless           Render frames without a terminal and report timing
+      --frames <N>         Frames to render [default: 60]
+      --cols <N>           Samples across [default: 200]
+      --rows <N>           Samples down [default: 100]
+      --limit <N>          Iteration limit (default: scaled to the magnification)
+      --magnification <X>  Magnification to render at [default: 1]
+      --fractal <FRACTAL>  Which fractal to render [mandelbrot, julia]
+      --ppm <FILE>         Write the last frame as a binary PPM
+  -h, --help               Print help
+  -V, --version            Print version
 ```
+
+### Headless mode
+
+`--headless` renders frames with no terminal involved and reports what it measured:
+
+```sh
+$ frascii --headless --cols 200 --rows 100 --frames 30 --magnification 1e6
+20000 samples/frame, limit 2691, backend cpu
+30 frames: mean 5.27ms, worst 5.84ms -> 189.7 fps
+meets 30fps
+frame was 11.1% interior
+```
+
+It exists for two reasons beyond benchmarking. It reports the **interior fraction** because a run that renders a solid black frame can look 85× faster than real work — the cardioid shortcut answers an all-interior view instantly — so the number is printed and flagged when the view is not representative. And it consumes `frascii-core` while linking no frontend at all, which makes the crate boundary something the build checks rather than something the docs claim.
+
+`--ppm` writes the last frame as a plain greyscale image, for checking geometry.
 
 `--log` takes a file rather than a stream because the TUI owns the alternate screen: a log line on stdout or stderr is painted over the render. Tail it from a second terminal:
 
