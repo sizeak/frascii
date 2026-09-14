@@ -96,6 +96,7 @@ tail -f target/frascii.log      # ... in another terminal
 | `p` | Next palette |
 | `m` | Glyph / half-block rendering |
 | `s` | Supersampling: 1× / 2× / 3× |
+| `[` / `]` | Dive slower / faster |
 | `?` | Full control list |
 | `i` | Status bar |
 | `c` | Palette cycling on/off |
@@ -117,6 +118,8 @@ It costs `k²` times the samples, measured at 1e6 magnification on a 20,000-pixe
 `o` walks the Julia parameter around a circle near the Mandelbrot boundary, which is the band where Julia sets have structure rather than being a filled disc or dust. It switches to Julia if you were on Mandelbrot, because orbiting a parameter the current fractal does not have would look like the key did nothing.
 
 `z` dives forever: descend toward the boundary, re-aim every eight-fold magnification, and on reaching the limit of `f64` reset to the whole set and pick somewhere new. It stops one notch *short* of the hard precision clamp — diving all the way would show several visibly mushy frames before every cut.
+
+`[` and `]` set the pace, from about twenty minutes for a full descent down to thirty seconds; the default is two and a half. The step applies to the logarithm of the rate, because a dive's *duration* goes as `1 / ln(rate)` — stepping the rate itself would make each press imperceptible at the fast end and enormous at the slow one. The current pace shows in the status bar.
 
 Every rate is per second and applied per frame, and zoom is geometric in elapsed time, so a dive covers the same ground in the same wall-clock time on a slow machine — in fewer, chunkier frames rather than more slowly.
 

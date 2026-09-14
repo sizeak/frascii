@@ -104,21 +104,31 @@ const ORBIT_PERIOD: Duration = Duration::from_secs(24);
 /// they are dust.
 const ORBIT_RADIUS: f64 = 0.7;
 
-/// How much the auto-zoom shrinks the view per second.
+/// How fast the auto-zoom descends by default, as magnification per second.
 ///
-/// `1/1.2`, so the magnification grows about 1.2× a second and a full dive from
-/// the whole set to the `f64` wall takes roughly two and a half minutes. The
-/// first version was 0.55 — nearly 1.8× a second, a complete dive in under a
-/// minute — which is a fly-through rather than something you can watch: detail
-/// resolves and is gone before the eye settles on it. This is an unattended
-/// display, so the rate wants to be slow enough to look at.
+/// A full dive from the whole set to the `f64` wall takes about two and a half
+/// minutes at this rate. The first version was ~1.8× a second — a complete
+/// descent in under a minute — which is a fly-through rather than something you
+/// can watch: detail resolves and is gone before the eye settles on it. `[` and
+/// `]` adjust it live, because the right speed is a matter of taste and mood
+/// rather than something to be argued about in a constant.
+const DIVE_RATE_DEFAULT: f64 = 1.2;
+
+/// The slowest dive, about twenty minutes from the whole set to the wall.
+const DIVE_RATE_MIN: f64 = 1.025;
+
+/// The fastest, about thirty seconds.
+const DIVE_RATE_MAX: f64 = 2.7;
+
+/// How much one press of `[` or `]` scales the dive rate.
 ///
-/// Applied geometrically — `factor.powf(dt)`, never `factor * dt` — so the dive
-/// advances at the same rate in *plane* terms whatever the frame rate. On a
-/// slow machine it takes the same wall-clock time in fewer, chunkier frames
-/// rather than slowing down, which matters precisely because nobody is watching
-/// the frame counter.
-const ZOOM_PER_SECOND: f64 = 1.0 / 1.2;
+/// Applied to `ln(rate)`, not to the rate, because the *time* a dive takes goes
+/// as `1 / ln(rate)`. Stepping the rate directly would make the presses feel
+/// wildly uneven: the same absolute change is imperceptible near 2.5× and
+/// enormous near 1.02×. On the logarithm each press is a roughly constant
+/// fraction of the dive's duration, which is what the user is actually
+/// adjusting.
+const DIVE_RATE_STEP: f64 = 1.4;
 
 /// How far the dive descends before choosing a fresh target.
 ///
@@ -200,6 +210,8 @@ pub struct App {
     drive: Drive,
     /// Where the Julia parameter is on its path, in turns.
     orbit_turns: f64,
+    /// How fast the dive descends, as magnification per second.
+    dive_rate: f64,
     /// The magnification at which the dive last chose a target.
     dived_from: f64,
     /// Set when the dive wants a fresh grid to re-target from.
@@ -259,6 +271,7 @@ impl App {
             cycling: true,
             drive: Drive::AutoZoom,
             orbit_turns: 0.0,
+            dive_rate: DIVE_RATE_DEFAULT,
             dived_from: 1.0,
             retarget_pending: false,
         }
@@ -342,6 +355,8 @@ impl App {
             (KeyCode::Char('o' | 'O'), _) => self.toggle_drive(Drive::JuliaOrbit),
             (KeyCode::Char('z' | 'Z'), _) => self.toggle_drive(Drive::AutoZoom),
             (KeyCode::Char(' '), _) => self.clock.toggle_pause(),
+            (KeyCode::Char(']' | '}'), _) => self.adjust_dive_rate(1),
+            (KeyCode::Char('[' | '{'), _) => self.adjust_dive_rate(-1),
 
             _ => {}
         }
@@ -441,6 +456,16 @@ impl App {
         }
     }
 
+    /// Make the dive faster (`steps` positive) or slower.
+    ///
+    /// Adjustable while it is running, and while it is not: you would want to
+    /// set the pace before starting as readily as during.
+    fn adjust_dive_rate(&mut self, steps: i32) {
+        let exponent = DIVE_RATE_STEP.powi(steps);
+        let rate = self.dive_rate.ln() * exponent;
+        self.dive_rate = rate.exp().clamp(DIVE_RATE_MIN, DIVE_RATE_MAX);
+    }
+
     /// Advance whatever is moving by `dt`.
     fn advance(&mut self, dt: Duration) {
         let seconds = dt.as_secs_f64();
@@ -484,9 +509,11 @@ impl App {
             return;
         }
 
+        // Geometric in elapsed time, so the descent covers the same plane
+        // distance per second whatever the frame rate.
         self.params
             .viewport
-            .zoom_centre(ZOOM_PER_SECOND.powf(seconds));
+            .zoom_centre((1.0 / self.dive_rate).powf(seconds));
 
         // Re-aim periodically. Without this the dive holds one target all the
         // way down and ends up inside a solid region — the boundary it aimed at
@@ -607,7 +634,7 @@ impl App {
         }
 
         if self.help {
-            let overlay = centred(area, 46, 16);
+            let overlay = centred(area, 46, 17);
             frame.render_widget(Clear, overlay);
             frame.render_widget(help_overlay(), overlay);
         }
@@ -709,15 +736,22 @@ impl App {
 
     /// What is currently moving, if anything.
     fn motion_text(&self) -> String {
-        let mut parts = Vec::new();
+        let mut parts: Vec<String> = Vec::new();
         if self.clock.is_paused() {
-            parts.push("paused");
+            parts.push("paused".to_owned());
         }
         if self.drive != Drive::Still {
-            parts.push(self.drive.name());
+            parts.push(self.drive.name().to_owned());
+        }
+        // Shown while diving, and also whenever it has been moved off the
+        // default — otherwise adjusting the rate with nothing running would
+        // give no feedback at all.
+        let adjusted = (self.dive_rate - DIVE_RATE_DEFAULT).abs() > 1e-9;
+        if self.drive == Drive::AutoZoom || adjusted {
+            parts.push(format!("{:.2}x/s", self.dive_rate));
         }
         if self.cycling {
-            parts.push("cycling");
+            parts.push("cycling".to_owned());
         }
         parts.join(" ")
     }
@@ -813,6 +847,7 @@ fn help_overlay() -> Paragraph<'static> {
         row("m", "glyph / half-block"),
         row("s", "supersampling 1x/2x/3x"),
         row("z", "auto-zoom (dives forever)"),
+        row("[ / ]", "dive slower / faster"),
         row("o", "Julia parameter orbit"),
         row("c", "palette cycling"),
         row("Space", "pause motion"),
@@ -1437,9 +1472,88 @@ mod tests {
         assert_eq!(app.motion_text(), "", "nothing is moving");
 
         let mut live = launched(30, 10);
-        assert_eq!(live.motion_text(), "auto-zoom cycling");
+        // The dive rate rides along while diving, so the pace is visible.
+        assert_eq!(live.motion_text(), "auto-zoom 1.20x/s cycling");
         let _ = live.handle_key(press(KeyCode::Char(' ')));
         assert!(live.motion_text().starts_with("paused"));
+    }
+
+    #[test]
+    fn brackets_adjust_the_dive_rate_within_bounds() {
+        let mut app = launched(30, 10);
+        assert!((app.dive_rate - DIVE_RATE_DEFAULT).abs() < 1e-12);
+
+        let _ = app.handle_key(press(KeyCode::Char('[')));
+        assert!(app.dive_rate < DIVE_RATE_DEFAULT, "[ must slow the dive");
+        let _ = app.handle_key(press(KeyCode::Char(']')));
+        assert!(
+            (app.dive_rate - DIVE_RATE_DEFAULT).abs() < 1e-9,
+            "one step each way should return: {}",
+            app.dive_rate
+        );
+
+        // Bounded at both ends: an unbounded rate is either a dive nobody sees
+        // or one that never finishes.
+        for _ in 0..40 {
+            let _ = app.handle_key(press(KeyCode::Char(']')));
+        }
+        assert!((app.dive_rate - DIVE_RATE_MAX).abs() < 1e-9);
+        for _ in 0..80 {
+            let _ = app.handle_key(press(KeyCode::Char('[')));
+        }
+        assert!((app.dive_rate - DIVE_RATE_MIN).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_rate_steps_evenly_in_dive_duration_not_in_magnification() {
+        // A dive's *duration* goes as 1/ln(rate), so stepping the rate
+        // directly would make presses feel wildly uneven — imperceptible near
+        // the fast end, enormous near the slow one. Each press should change
+        // the duration by roughly the same fraction.
+        let mut app = launched(30, 10);
+        let mut durations = Vec::new();
+        for _ in 0..6 {
+            durations.push(1.0 / app.dive_rate.ln());
+            let _ = app.handle_key(press(KeyCode::Char('[')));
+        }
+        let ratios: Vec<f64> = durations.windows(2).map(|w| w[1] / w[0]).collect();
+        let first = ratios[0];
+        for ratio in &ratios {
+            assert!((ratio - first).abs() < 1e-9, "uneven steps: {ratios:?}");
+        }
+        assert!(first > 1.0, "[ should lengthen the dive: {first}");
+    }
+
+    #[test]
+    fn a_slower_rate_actually_descends_less() {
+        // The setting has to reach the dive, not just the status line.
+        let area = Rect::new(0, 0, 40, 14);
+        let mut fast = updated(40, 14);
+        fast.drive = Drive::AutoZoom;
+        let mut slow = updated(40, 14);
+        slow.drive = Drive::AutoZoom;
+        for _ in 0..3 {
+            let _ = slow.handle_key(press(KeyCode::Char('[')));
+        }
+
+        animate(&mut fast, area, 40, Duration::from_millis(100));
+        animate(&mut slow, area, 40, Duration::from_millis(100));
+        assert!(
+            slow.magnification() < fast.magnification(),
+            "slow {:.3e} vs fast {:.3e}",
+            slow.magnification(),
+            fast.magnification()
+        );
+    }
+
+    #[test]
+    fn an_adjusted_rate_is_shown_even_when_nothing_is_diving() {
+        // Otherwise pressing the key with the dive stopped would give no
+        // feedback at all.
+        let mut app = updated(30, 10);
+        assert_eq!(app.motion_text(), "");
+        let _ = app.handle_key(press(KeyCode::Char('[')));
+        assert!(app.motion_text().contains("x/s"), "{}", app.motion_text());
     }
 
     #[test]
@@ -1456,16 +1570,16 @@ mod tests {
     fn the_help_overlay_is_clamped_into_a_small_terminal() {
         // Smaller than the box is normal; it must shrink rather than underflow.
         let area = Rect::new(0, 0, 10, 4);
-        let overlay = centred(area, 46, 16);
+        let overlay = centred(area, 46, 17);
         assert_eq!((overlay.width, overlay.height), (10, 4));
         assert_eq!((overlay.x, overlay.y), (0, 0));
     }
 
     #[test]
     fn the_help_overlay_is_centred_in_a_large_terminal() {
-        let overlay = centred(Rect::new(0, 0, 100, 40), 46, 16);
-        assert_eq!((overlay.width, overlay.height), (46, 16));
-        assert_eq!((overlay.x, overlay.y), (27, 12));
+        let overlay = centred(Rect::new(0, 0, 100, 40), 46, 17);
+        assert_eq!((overlay.width, overlay.height), (46, 17));
+        assert_eq!((overlay.x, overlay.y), (27, 11));
     }
 
     #[test]
@@ -1870,6 +1984,8 @@ mod tests {
             KeyCode::Char('i'),
             KeyCode::Char('s'),
             KeyCode::Char('?'),
+            KeyCode::Char('['),
+            KeyCode::Char(']'),
             KeyCode::Char('c'),
             KeyCode::Char('o'),
             KeyCode::Char('z'),
