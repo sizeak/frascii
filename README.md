@@ -2,7 +2,7 @@
 
 A terminal ASCII-art renderer for realtime fractals — a live, colourful ASCII rendering of escape-time fractals drawn straight into your terminal.
 
-> **Status: it explores.** Mandelbrot and Julia sets in glyph or half-block rendering, with pan, zoom, nine truecolour palettes and a status line. The motion modes — palette cycling, Julia orbit, unattended auto-zoom — are next; see [CLAUDE.md](CLAUDE.md#not-yet-designed).
+> **Status: complete for what it set out to do.** Mandelbrot and Julia sets in glyph or half-block rendering, with pan, zoom, nine truecolour palettes, palette cycling, a Julia parameter orbit, and an unattended auto-zoom that dives forever. What is deliberately *not* here is listed in [CLAUDE.md](CLAUDE.md#not-yet-designed).
 
 ```
 :::::::::::::::::::::::::::::::::::::::::::::-------------------===+-----------:::::::::::::::::
@@ -96,7 +96,21 @@ tail -f target/frascii.log      # ... in another terminal
 | `p` | Next palette |
 | `m` | Glyph / half-block rendering |
 | `i` | Status line |
+| `c` | Palette cycling on/off |
+| `o` | Julia parameter orbit |
+| `z` | Unattended auto-zoom |
+| `Space` | Pause all motion |
 | `q` / `Esc` / `Ctrl+C` | Quit |
+
+### Motion
+
+`c` drifts the colour mapping without touching the samples, so it costs one pass over an existing grid and no fractal maths at all — it composes with everything else.
+
+`o` walks the Julia parameter around a circle near the Mandelbrot boundary, which is the band where Julia sets have structure rather than being a filled disc or dust. It switches to Julia if you were on Mandelbrot, because orbiting a parameter the current fractal does not have would look like the key did nothing.
+
+`z` dives forever: descend toward the boundary, re-aim every eight-fold magnification, and on reaching the limit of `f64` reset to the whole set and pick somewhere new. It stops one notch *short* of the hard precision clamp — diving all the way would show several visibly mushy frames before every cut.
+
+Every rate is per second and applied per frame, and zoom is geometric in elapsed time, so a dive covers the same ground in the same wall-clock time on a slow machine — in fewer, chunkier frames rather than more slowly.
 
 **Pan before you zoom.** Zoom is about the centre of the view, and the home view is centred on `-0.75`, which is *inside* the set — so pressing `+` from a fresh start dives into the solid interior and the screen goes blank. Pan to some boundary filigree first. Scroll-to-cursor would fix this properly and needs mouse capture, which is not wired up yet; the unattended auto-zoom mode will use core's `boundary_target` to pick somewhere worth diving into.
 

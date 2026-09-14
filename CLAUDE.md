@@ -97,10 +97,16 @@ In **`frascii-tui`** — presentation and dispatch:
 
 - braille or octant modes, if ever. They reach 2×4 sub-samples but carry **one colour per cell**, which is useless for a colour-mapped fractal — 1×2 half-block is the ceiling for coloured sub-cell rendering, so this is a "probably never" rather than a "not yet"
 - zoom about the cursor, which needs mouse capture. Not merely unwired: `EnableMouseCapture` turns on all-motion reporting that has to be coalesced, and it must be disabled in the teardown **and** the panic hook or a crash leaves the user's shell eating escape codes
+- supersampling, and the reduction that would go with it. `plane_at` already takes `f64` sample coordinates so a jittered or rotated pattern needs no core change; the box filter belongs next to the palette, in colour space — averaging `smooth` across a boundary gives a colour belonging to neither side
+- periodicity checking in the kernels, which is the next real optimisation if one is ever needed. It outranks SIMD for deep views, where the cardioid shortcut catches nothing. Needs a false-positive property test first: too loose an epsilon paints exterior as interior, which looks exactly like a kernel bug
 - the camera and animation clock's *keybindings* (the camera's own maths is core's). The clock should be `Instant`-based: an earlier tick counter incremented only on idle polls, so any keypress skipped it, and it was deleted rather than left to be built on
 - terminal colour-capability detection. It belongs *upstream* of `to_colour`, choosing which colour is produced — not in a per-cell conversion that runs tens of thousands of times a frame
 
-The render path is built: `App::update` samples (only when its `SampleParams` changed) and shades; `App::draw` blits the finished grid and nothing else. Glyph mode, nine palettes, both kernels and keyboard interaction exist; half-block and motion do not.
+The render path is built: `App::update` ticks the clock, advances whatever is moving, samples (only when its `SampleParams` changed) and shades; `App::draw` blits the finished grid and nothing else. Glyph and half-block rendering, nine palettes, both kernels, keyboard interaction and all three motion modes exist.
+
+**The dive must re-aim periodically, not once.** `boundary_target` picks a point that is on the boundary *at the current scale*; several decades down, the filament it sat on has resolved into structure that moved away from it. Diving on a single target renders solid interior within a few decades — measured at 898 blank frames out of 1200 before `RETARGET_EVERY` existed. Eight-fold is the factor the original validation used. This is the same lesson the first `--headless` benchmark taught, arriving a second time by a different route: blind descent lands in solid regions.
+
+The dive also stops at `Precision::Marginal` rather than at the hard clamp. Reaching the clamp would show several visibly mushy frames before *every* cut, forever; the clamp stays as the thing that refuses a manual zoom.
 
 Half-block landed in increment 4 and **the aspect-absorption claim held**: `switching_mode_keeps_the_same_view` zooms and pans, presses `m`, and asserts the centre, width and height of the plane region are unchanged while the sample lattice doubles and the aspect halves. Nothing in core needed touching — the mode is a `CellMode` variant, a subdivision pair, and a blit.
 

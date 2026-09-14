@@ -17,6 +17,8 @@
 //! sizes are kept for the same reason they were added — they are what caught
 //! the border-overpaint bug.
 
+use std::time::Instant;
+
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
@@ -31,7 +33,7 @@ use crate::App;
 /// property that makes them worth having.
 fn frame(width: u16, height: u16) -> String {
     let mut app = App::new();
-    app.update(Rect::new(0, 0, width, height));
+    app.update(Rect::new(0, 0, width, height), Instant::now());
 
     let mut terminal = Terminal::new(TestBackend::new(width, height))
         .expect("TestBackend cannot fail to initialise");

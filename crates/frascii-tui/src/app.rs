@@ -2,7 +2,9 @@
 
 use std::time::{Duration, Instant};
 
-use frascii_core::{Kernel, Precision, SampleGrid, Viewport};
+use frascii_core::{
+    Complex, Kernel, Precision, SampleGrid, Viewport, boundary_target, is_interesting,
+};
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
@@ -10,6 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
+use crate::clock::Clock;
 use crate::error::Result;
 use crate::palette::Palette;
 use crate::render::Grid;
@@ -85,6 +88,42 @@ const PAN_FRACTION: f64 = 1.0 / 12.0;
 /// How much one zoom press scales the view.
 const ZOOM_STEP: f64 = 0.8;
 
+/// Palette phase advance, in iterations per second.
+///
+/// With [`Palette::PERIOD`] at 32 iterations this is a full cycle in a little
+/// over five seconds — slow enough to read as drift rather than strobing.
+const CYCLE_RATE: f64 = 6.0;
+
+/// How long the Julia parameter takes to travel once around its path.
+const ORBIT_PERIOD: Duration = Duration::from_secs(24);
+
+/// The radius of the Julia parameter's path.
+///
+/// Chosen to stay near the Mandelbrot set's boundary, which is where Julia sets
+/// are interesting: well inside and they are a filled disc, well outside and
+/// they are dust.
+const ORBIT_RADIUS: f64 = 0.7;
+
+/// How much the auto-zoom shrinks the view per second.
+///
+/// Applied geometrically — `factor.powf(dt)`, never `factor * dt` — so the
+/// dive advances at the same rate in *plane* terms whatever the frame rate. On
+/// a slow machine it takes the same wall-clock time in fewer, chunkier frames
+/// rather than slowing down, which matters when the mode runs unattended.
+const ZOOM_PER_SECOND: f64 = 0.55;
+
+/// How far the dive descends before choosing a fresh target.
+///
+/// A target must be re-chosen periodically, not once per dive: a point on the
+/// boundary at one scale is not on the boundary several decades down, because
+/// the filament it sits on resolves into structure that moves away from it.
+/// Diving on a single target renders solid interior within a few decades —
+/// measured at 898 blank frames out of 1200 before this existed.
+///
+/// Eight is the factor the original validation used when it reached 2.1e6 over
+/// eight steps without ever losing detail.
+const RETARGET_EVERY: f64 = 8.0;
+
 /// The furthest the iteration limit can be biased from the viewport's
 /// suggestion, in doublings either way.
 ///
@@ -92,6 +131,33 @@ const ZOOM_STEP: f64 = 0.8;
 /// *taste* — trading detail against frame time — not for reaching depths the
 /// automatic value cannot. Unbounded, it would be a way to hang the renderer.
 const LIMIT_BIAS_RANGE: i32 = 4;
+
+/// What is moving the view by itself.
+///
+/// Exclusive, because these fight: an orbit reframes home on every parameter
+/// change while a dive is trying to descend, so running both would produce
+/// neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Drive {
+    /// Nothing moves unless a key says so.
+    #[default]
+    Still,
+    /// The Julia parameter travels around a path.
+    JuliaOrbit,
+    /// Dive toward the boundary forever, resetting at the precision wall.
+    AutoZoom,
+}
+
+impl Drive {
+    /// The drive's name, for a status line.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Still => "still",
+            Self::JuliaOrbit => "orbit",
+            Self::AutoZoom => "auto-zoom",
+        }
+    }
+}
 
 /// The frontend's state.
 #[derive(Debug)]
@@ -111,6 +177,27 @@ pub struct App {
     /// Off by default so the fractal gets the whole terminal, and so the render
     /// snapshots capture the picture rather than a line of changing numbers.
     hud: bool,
+    /// Animation time.
+    clock: Clock,
+    /// Whether the palette drifts on its own.
+    ///
+    /// Independent of [`Drive`] rather than a variant of it, because cycling
+    /// composes with everything: it changes only the shader, so it can run
+    /// during a dive, an orbit, or a still frame.
+    cycling: bool,
+    /// What is moving the view.
+    drive: Drive,
+    /// Where the Julia parameter is on its path, in turns.
+    orbit_turns: f64,
+    /// The magnification at which the dive last chose a target.
+    dived_from: f64,
+    /// Set when the dive wants a fresh grid to re-target from.
+    ///
+    /// Two-phase because picking a target needs *samples*: the frame that
+    /// resets the view has only the old deep grid, so the choice waits one
+    /// frame for the home view to be sampled. The viewer sees the whole set
+    /// briefly between dives, which is the right thing to show anyway.
+    retarget_pending: bool,
 }
 
 impl App {
@@ -137,6 +224,12 @@ impl App {
             palette_index: 0,
             limit_bias: 0,
             hud: false,
+            clock: Clock::new(),
+            cycling: false,
+            drive: Drive::Still,
+            orbit_turns: 0.0,
+            dived_from: 1.0,
+            retarget_pending: false,
         }
     }
 
@@ -212,6 +305,10 @@ impl App {
             (KeyCode::Char('p' | 'P'), _) => self.next_palette(),
             (KeyCode::Char('m' | 'M'), _) => self.next_mode(),
             (KeyCode::Char('i' | 'I'), _) => self.hud = !self.hud,
+            (KeyCode::Char('c'), _) => self.cycling = !self.cycling,
+            (KeyCode::Char('o' | 'O'), _) => self.toggle_drive(Drive::JuliaOrbit),
+            (KeyCode::Char('z' | 'Z'), _) => self.toggle_drive(Drive::AutoZoom),
+            (KeyCode::Char(' '), _) => self.clock.toggle_pause(),
 
             _ => {}
         }
@@ -282,6 +379,95 @@ impl App {
         self.shader.palette = Palette::nth(self.palette_index);
     }
 
+    /// Turn a drive on, or back to still if it was already running.
+    ///
+    /// Switching to the orbit also switches to Julia: orbiting a parameter the
+    /// current fractal does not have would look like the key did nothing.
+    fn toggle_drive(&mut self, drive: Drive) {
+        self.drive = if self.drive == drive {
+            Drive::Still
+        } else {
+            drive
+        };
+
+        if self.drive == Drive::JuliaOrbit && !self.params.kernel.same_kind(julia_at(0.0)) {
+            self.params.kernel = julia_at(self.orbit_turns);
+            self.reset();
+        }
+    }
+
+    /// Advance whatever is moving by `dt`.
+    fn advance(&mut self, dt: Duration) {
+        let seconds = dt.as_secs_f64();
+
+        if self.cycling {
+            // Wrapped every frame. Left to accumulate, the value eventually
+            // dwarfs the increment and cycling first stutters, then stalls —
+            // a failure that only shows after a day of the unattended mode.
+            self.shader.phase = (self.shader.phase + seconds * CYCLE_RATE) % Palette::PERIOD;
+        }
+
+        match self.drive {
+            Drive::Still => {}
+            Drive::JuliaOrbit => {
+                self.orbit_turns =
+                    (self.orbit_turns + seconds / ORBIT_PERIOD.as_secs_f64()).fract();
+                self.params.kernel = julia_at(self.orbit_turns);
+            }
+            Drive::AutoZoom => self.dive(seconds),
+        }
+    }
+
+    /// One frame of the unattended dive.
+    ///
+    /// Geometric in `dt`, so the descent covers the same plane distance per
+    /// second whatever the frame rate.
+    fn dive(&mut self, seconds: f64) {
+        // Stop at `Marginal`, not at the hard clamp. Diving to the clamp would
+        // show several visibly mushy frames before *every* cut — forever, on a
+        // loop — where stopping a couple of decades early keeps every frame
+        // sharp. The clamp still exists to refuse a manual zoom.
+        if self.params.viewport.precision() != Precision::Ample {
+            self.params.viewport = Viewport::home(
+                self.params.viewport.cols,
+                self.params.viewport.rows,
+                self.params.viewport.sample_aspect,
+            );
+            self.limit_bias = 0;
+            self.dived_from = 1.0;
+            self.retarget_pending = true;
+            return;
+        }
+
+        self.params
+            .viewport
+            .zoom_centre(ZOOM_PER_SECOND.powf(seconds));
+
+        // Re-aim periodically. Without this the dive holds one target all the
+        // way down and ends up inside a solid region — the boundary it aimed at
+        // is no longer where it was several decades ago.
+        if self.params.viewport.magnification() / self.dived_from >= RETARGET_EVERY {
+            self.retarget_pending = true;
+        }
+    }
+
+    /// Aim the dive at somewhere that will still hold detail, if the current
+    /// grid offers one.
+    ///
+    /// Called after sampling, so it reads the grid just produced. A view with
+    /// no boundary in it — solid interior or empty exterior — leaves the flag
+    /// set and tries again next frame rather than diving into a flat field.
+    fn retarget(&mut self) {
+        if !is_interesting(&self.samples) {
+            return;
+        }
+        if let Some(point) = boundary_target(&self.samples, &self.params.viewport) {
+            self.params.viewport.centre = point;
+            self.dived_from = self.params.viewport.magnification();
+            self.retarget_pending = false;
+        }
+    }
+
     /// Switch between glyph and half-block rendering.
     ///
     /// This does re-sample, and unavoidably: the mode changes the sample
@@ -303,7 +489,10 @@ impl App {
     /// depend on the clock, and sample time, shade time and ratatui's own
     /// buffer diff stay separately measurable instead of collapsing into one
     /// unattributable call.
-    pub fn update(&mut self, area: Rect) {
+    pub fn update(&mut self, area: Rect, now: Instant) {
+        let dt = self.clock.tick(now);
+        self.advance(dt);
+
         let (cols, rows) = self
             .shader
             .mode
@@ -325,6 +514,11 @@ impl App {
                 self.params.limit,
             );
             self.sampled_for = Some(self.params);
+
+            // After sampling, so the choice reads the grid just produced.
+            if self.retarget_pending {
+                self.retarget();
+            }
         }
 
         shade_into(&self.shader, &self.samples, &mut self.cells);
@@ -387,6 +581,24 @@ impl App {
             Span::styled(format!("iter {}", self.params.limit), dim),
         ];
 
+        if self.drive != Drive::Still || self.cycling || self.clock.is_paused() {
+            let mut motion = String::from("  ");
+            if self.clock.is_paused() {
+                motion.push_str("paused ");
+            }
+            if self.drive != Drive::Still {
+                motion.push_str(self.drive.name());
+                motion.push(' ');
+            }
+            if self.cycling {
+                motion.push_str("cycling");
+            }
+            spans.push(Span::styled(
+                motion.trim_end().to_owned(),
+                Style::default().fg(Color::Rgb(0x60, 0xc0, 0x90)),
+            ));
+        }
+
         // Only shown when it means something. At `Ample` the user does not need
         // to know the precision wall exists.
         match viewport.precision() {
@@ -422,7 +634,7 @@ impl App {
             // for one frame, and the grid would be built for the wrong shape.
             terminal.autoresize()?;
             let area = terminal.get_frame().area();
-            self.update(area);
+            self.update(area, Instant::now());
             terminal.draw(|frame| self.draw(frame))?;
 
             next_frame += TICK;
@@ -455,6 +667,18 @@ impl App {
     }
 }
 
+/// The Julia parameter at a point on its circular path.
+///
+/// A circle near the Mandelbrot boundary rather than an arbitrary sweep: that
+/// is the band where Julia sets have structure, so the whole orbit is worth
+/// watching instead of just the part that crosses it.
+fn julia_at(turns: f64) -> Kernel {
+    let theta = turns * std::f64::consts::TAU;
+    Kernel::Julia {
+        c: Complex::new(ORBIT_RADIUS * theta.cos(), ORBIT_RADIUS * theta.sin()),
+    }
+}
+
 impl Default for App {
     fn default() -> Self {
         Self::new()
@@ -471,8 +695,21 @@ mod tests {
 
     fn updated(width: u16, height: u16) -> App {
         let mut app = App::new();
-        app.update(Rect::new(0, 0, width, height));
+        app.update(Rect::new(0, 0, width, height), Instant::now());
         app
+    }
+
+    /// Drive the app for `frames` frames of exactly `step`, from a fixed
+    /// origin.
+    ///
+    /// Controlled time rather than wall time: an animation test that depended
+    /// on how long the test process happened to take would be flaky, and the
+    /// rates here are all per-second.
+    fn animate(app: &mut App, area: Rect, frames: u32, step: Duration) {
+        let start = Instant::now();
+        for i in 0..=frames {
+            app.update(area, start + step * i);
+        }
     }
 
     #[test]
@@ -550,7 +787,7 @@ mod tests {
         let mut app = updated(40, 15);
         let before = app.samples.clone();
         let params = app.sampled_for;
-        app.update(Rect::new(0, 0, 40, 15));
+        app.update(Rect::new(0, 0, 40, 15), Instant::now());
         assert_eq!(app.sampled_for, params);
         assert_eq!(app.samples, before);
     }
@@ -559,7 +796,7 @@ mod tests {
     fn a_resize_does_re_sample() {
         let mut app = updated(40, 15);
         let before = app.sampled_for;
-        app.update(Rect::new(0, 0, 41, 15));
+        app.update(Rect::new(0, 0, 41, 15), Instant::now());
         assert_ne!(app.sampled_for, before, "a resize must re-sample");
         assert_eq!((app.cells.width(), app.cells.height()), (41, 15));
     }
@@ -574,7 +811,7 @@ mod tests {
         let cells_before = app.cells.clone();
 
         app.shader.phase += 8.0;
-        app.update(Rect::new(0, 0, 30, 12));
+        app.update(Rect::new(0, 0, 30, 12), Instant::now());
 
         assert_eq!(app.samples, samples_before, "the samples were recomputed");
         assert_ne!(app.cells, cells_before, "the colours did not change");
@@ -639,7 +876,7 @@ mod tests {
         for _ in 0..10 {
             let _ = deep.handle_key(press(KeyCode::Char('+')));
         }
-        deep.update(Rect::new(0, 0, 60, 20));
+        deep.update(Rect::new(0, 0, 60, 20), Instant::now());
 
         let before_shallow = shallow.params.viewport.centre.re;
         let before_deep = deep.params.viewport.centre.re;
@@ -704,12 +941,12 @@ mod tests {
         let automatic = app.params.limit;
 
         let _ = app.handle_key(press(KeyCode::Char('.')));
-        app.update(Rect::new(0, 0, 50, 20));
+        app.update(Rect::new(0, 0, 50, 20), Instant::now());
         assert!(app.params.limit > automatic, "`.` must raise the limit");
 
         let _ = app.handle_key(press(KeyCode::Char(',')));
         let _ = app.handle_key(press(KeyCode::Char(',')));
-        app.update(Rect::new(0, 0, 50, 20));
+        app.update(Rect::new(0, 0, 50, 20), Instant::now());
         assert!(app.params.limit < automatic, "`,` must lower it");
 
         // Bounded: the suggestion already tracks depth, so the bias is for
@@ -730,13 +967,13 @@ mod tests {
         // bias would have replaced the depth tracking rather than adjusting it.
         let mut app = updated(50, 20);
         let _ = app.handle_key(press(KeyCode::Char(',')));
-        app.update(Rect::new(0, 0, 50, 20));
+        app.update(Rect::new(0, 0, 50, 20), Instant::now());
         let shallow = app.params.limit;
 
         for _ in 0..20 {
             let _ = app.handle_key(press(KeyCode::Char('+')));
         }
-        app.update(Rect::new(0, 0, 50, 20));
+        app.update(Rect::new(0, 0, 50, 20), Instant::now());
         assert!(app.params.limit > shallow, "depth must still raise it");
     }
 
@@ -786,7 +1023,7 @@ mod tests {
         let mut app = updated(50, 20);
         let mandel = app.cells.clone();
         let _ = app.handle_key(press(KeyCode::Tab));
-        app.update(Rect::new(0, 0, 50, 20));
+        app.update(Rect::new(0, 0, 50, 20), Instant::now());
         assert_ne!(app.cells, mandel, "julia rendered the same as mandelbrot");
         // And is not blank.
         let glyphs: std::collections::BTreeSet<char> = app.cells.cells().map(|c| c.glyph).collect();
@@ -803,7 +1040,7 @@ mod tests {
         let cells = app.cells.clone();
 
         let _ = app.handle_key(press(KeyCode::Char('p')));
-        app.update(Rect::new(0, 0, 40, 15));
+        app.update(Rect::new(0, 0, 40, 15), Instant::now());
 
         assert_ne!(app.palette_name(), first, "the palette did not change");
         assert_eq!(app.samples, samples, "changing the palette re-sampled");
@@ -826,12 +1063,12 @@ mod tests {
         let mut app = updated(40, 15);
         let before = app.sampled_for;
         let _ = app.handle_key(press(KeyCode::Char('l')));
-        app.update(Rect::new(0, 0, 40, 15));
+        app.update(Rect::new(0, 0, 40, 15), Instant::now());
         assert_ne!(app.sampled_for, before, "a pan must re-sample");
 
         let after_pan = app.sampled_for;
         let _ = app.handle_key(press(KeyCode::Char('p')));
-        app.update(Rect::new(0, 0, 40, 15));
+        app.update(Rect::new(0, 0, 40, 15), Instant::now());
         assert_eq!(app.sampled_for, after_pan, "a palette change re-sampled");
     }
 
@@ -844,7 +1081,7 @@ mod tests {
         );
 
         let _ = app.handle_key(press(KeyCode::Char('m')));
-        app.update(Rect::new(0, 0, 40, 16));
+        app.update(Rect::new(0, 0, 40, 16), Instant::now());
         assert!(
             app.cells.cells().all(|c| c.glyph == '▀'),
             "half-block should be one glyph"
@@ -854,7 +1091,7 @@ mod tests {
         assert_eq!((app.samples.cols(), app.samples.rows()), (40, 32));
 
         let _ = app.handle_key(press(KeyCode::Char('m')));
-        app.update(Rect::new(0, 0, 40, 16));
+        app.update(Rect::new(0, 0, 40, 16), Instant::now());
         assert_eq!((app.samples.cols(), app.samples.rows()), (40, 16));
     }
 
@@ -869,13 +1106,13 @@ mod tests {
             let _ = app.handle_key(press(KeyCode::Char('+')));
         }
         let _ = app.handle_key(press(KeyCode::Char('l')));
-        app.update(Rect::new(0, 0, 80, 24));
+        app.update(Rect::new(0, 0, 80, 24), Instant::now());
 
         let before = app.params.viewport;
         let (w, h, c) = (before.half_width, before.half_height(), before.centre);
 
         let _ = app.handle_key(press(KeyCode::Char('m')));
-        app.update(Rect::new(0, 0, 80, 24));
+        app.update(Rect::new(0, 0, 80, 24), Instant::now());
         let after = app.params.viewport;
 
         assert_eq!(after.centre, c, "the view moved");
@@ -897,7 +1134,7 @@ mod tests {
         let glyph = updated(60, 20);
         let mut half = updated(60, 20);
         let _ = half.handle_key(press(KeyCode::Char('m')));
-        half.update(Rect::new(0, 0, 60, 20));
+        half.update(Rect::new(0, 0, 60, 20), Instant::now());
 
         assert_eq!(half.samples.rows(), glyph.samples.rows() * 2);
         // Distinct colours are the signal in half-block, since the glyph is
@@ -943,7 +1180,7 @@ mod tests {
         for _ in 0..400 {
             let _ = deep.handle_key(press(KeyCode::Char('+')));
         }
-        deep.update(Rect::new(0, 0, 60, 20));
+        deep.update(Rect::new(0, 0, 60, 20), Instant::now());
         assert_ne!(
             deep.params.viewport.precision(),
             Precision::Ample,
@@ -959,9 +1196,232 @@ mod tests {
         let before = app.sampled_for;
         let samples = app.samples.clone();
         let _ = app.handle_key(press(KeyCode::Char('i')));
-        app.update(Rect::new(0, 0, 50, 18));
+        app.update(Rect::new(0, 0, 50, 18), Instant::now());
         assert_eq!(app.sampled_for, before);
         assert_eq!(app.samples, samples);
+    }
+
+    #[test]
+    fn palette_cycling_moves_the_colours_and_never_the_samples() {
+        // The cheapest motion mode, and its whole claim: no kernel work. If
+        // this fails, cycling has become the most expensive mode rather than
+        // the least.
+        let area = Rect::new(0, 0, 40, 15);
+        let mut app = updated(40, 15);
+        let _ = app.handle_key(press(KeyCode::Char('c')));
+        app.update(area, Instant::now());
+
+        let samples = app.samples.clone();
+        let cells = app.cells.clone();
+        let sampled_for = app.sampled_for;
+
+        animate(&mut app, area, 20, Duration::from_millis(33));
+
+        assert_eq!(app.samples, samples, "cycling re-sampled");
+        assert_eq!(app.sampled_for, sampled_for, "cycling touched the params");
+        assert_ne!(app.cells, cells, "the colours did not move");
+    }
+
+    #[test]
+    fn the_cycling_phase_stays_bounded_however_long_it_runs() {
+        // Unwrapped, the phase eventually dwarfs its own increment and cycling
+        // stutters then stalls — a failure that only appears after a day of the
+        // unattended mode running.
+        let area = Rect::new(0, 0, 20, 8);
+        let mut app = updated(20, 8);
+        let _ = app.handle_key(press(KeyCode::Char('c')));
+        // Twelve hours of animation, at a second per frame.
+        animate(&mut app, area, 43_200, Duration::from_secs(1));
+        assert!(
+            app.shader.phase >= 0.0 && app.shader.phase < Palette::PERIOD,
+            "phase escaped its period: {}",
+            app.shader.phase
+        );
+    }
+
+    #[test]
+    fn pausing_stops_the_animation_and_resuming_does_not_lurch() {
+        let area = Rect::new(0, 0, 30, 10);
+        let mut app = updated(30, 10);
+        let _ = app.handle_key(press(KeyCode::Char('c')));
+        animate(&mut app, area, 5, Duration::from_millis(33));
+        let phase = app.shader.phase;
+
+        let _ = app.handle_key(press(KeyCode::Char(' ')));
+        assert!(app.clock.is_paused());
+        // A long pause must contribute nothing.
+        animate(&mut app, area, 3, Duration::from_secs(10));
+        assert_eq!(app.shader.phase, phase, "the phase moved while paused");
+
+        let _ = app.handle_key(press(KeyCode::Char(' ')));
+        animate(&mut app, area, 1, Duration::from_millis(33));
+        let moved = app.shader.phase - phase;
+        assert!(
+            moved > 0.0 && moved < 1.0,
+            "resumed with a lurch of {moved} iterations"
+        );
+    }
+
+    #[test]
+    fn the_julia_orbit_moves_the_parameter_and_switches_fractal() {
+        // Orbiting a parameter the current fractal does not have would look
+        // like the key did nothing, so `o` switches to Julia too.
+        let area = Rect::new(0, 0, 40, 14);
+        let mut app = updated(40, 14);
+        assert_eq!(app.kernel_name(), "mandelbrot");
+
+        let _ = app.handle_key(press(KeyCode::Char('o')));
+        assert_eq!(app.kernel_name(), "julia");
+
+        let first = app.params.kernel;
+        animate(&mut app, area, 30, Duration::from_millis(100));
+        assert_ne!(app.params.kernel, first, "the parameter did not move");
+        assert!(app.params.kernel.same_kind(first), "it left julia");
+    }
+
+    #[test]
+    fn the_orbit_stays_on_its_path_forever() {
+        // The path is a circle near the Mandelbrot boundary, which is the band
+        // where Julia sets have structure. Drifting off it — through
+        // accumulated error, or a `fract` that was forgotten — would end in
+        // dust or a filled disc.
+        let area = Rect::new(0, 0, 24, 8);
+        let mut app = updated(24, 8);
+        let _ = app.handle_key(press(KeyCode::Char('o')));
+        // Fifty laps.
+        animate(&mut app, area, 1_200, Duration::from_secs(1));
+
+        let Kernel::Julia { c } = app.params.kernel else {
+            panic!("left julia");
+        };
+        let radius = c.norm_sqr().sqrt();
+        assert!(
+            (radius - ORBIT_RADIUS).abs() < 1e-9,
+            "drifted off the path: radius {radius}"
+        );
+        assert!(app.orbit_turns >= 0.0 && app.orbit_turns < 1.0);
+    }
+
+    #[test]
+    fn auto_zoom_descends_and_the_rate_is_geometric_in_time() {
+        // Geometric, not linear: the same wall-clock time must cover the same
+        // *plane* distance whatever the frame rate, so an unattended dive looks
+        // the same on a slow machine in fewer, chunkier frames.
+        let area = Rect::new(0, 0, 40, 14);
+
+        let mut fast = updated(40, 14);
+        let _ = fast.handle_key(press(KeyCode::Char('z')));
+        animate(&mut fast, area, 60, Duration::from_millis(50));
+
+        let mut slow = updated(40, 14);
+        let _ = slow.handle_key(press(KeyCode::Char('z')));
+        animate(&mut slow, area, 10, Duration::from_millis(300));
+
+        assert!(fast.magnification() > 1.0, "the dive did not descend");
+        let ratio = fast.magnification() / slow.magnification();
+        assert!(
+            (0.97..1.03).contains(&ratio),
+            "three seconds of diving differed by frame rate: {:.4e} vs {:.4e}",
+            fast.magnification(),
+            slow.magnification()
+        );
+    }
+
+    #[test]
+    fn auto_zoom_runs_unattended_without_stalling_or_going_blank() {
+        // The mode's whole promise. It must dive, hit the precision limit,
+        // reset, re-target and dive again — indefinitely — and never sit on a
+        // featureless frame.
+        let area = Rect::new(0, 0, 50, 18);
+        let mut app = updated(50, 18);
+        let _ = app.handle_key(press(KeyCode::Char('z')));
+
+        let start = Instant::now();
+        let step = Duration::from_millis(100);
+        let mut resets = 0;
+        let mut previous = app.magnification();
+        let mut featureless = 0;
+
+        for i in 0..=1_200 {
+            app.update(area, start + step * i);
+            if app.magnification() < previous {
+                resets += 1;
+            }
+            previous = app.magnification();
+            // A frame is allowed to be featureless only while re-targeting.
+            if !is_interesting(&app.samples) && !app.retarget_pending {
+                featureless += 1;
+            }
+        }
+
+        assert!(resets >= 2, "only {resets} resets in two minutes of diving");
+        assert!(app.magnification() > 1.0, "it ended up stalled at home");
+        assert!(
+            featureless < 60,
+            "{featureless} frames were featureless outside a re-target"
+        );
+    }
+
+    #[test]
+    fn auto_zoom_stops_short_of_the_hard_clamp() {
+        // It resets at `Marginal`, not at the clamp: diving all the way would
+        // show several visibly mushy frames before every cut, forever.
+        let area = Rect::new(0, 0, 40, 14);
+        let mut app = updated(40, 14);
+        let _ = app.handle_key(press(KeyCode::Char('z')));
+
+        let start = Instant::now();
+        let step = Duration::from_millis(100);
+        let mut deepest = 1.0_f64;
+        for i in 0..=600 {
+            app.update(area, start + step * i);
+            deepest = deepest.max(app.magnification());
+            assert_ne!(
+                app.params.viewport.precision(),
+                Precision::Exhausted,
+                "the dive reached the hard clamp"
+            );
+        }
+        assert!(deepest > 1e6, "it never got deep: {deepest:.3e}");
+    }
+
+    #[test]
+    fn the_drives_are_exclusive_and_toggle_off() {
+        // An orbit reframes home on every parameter change while a dive is
+        // descending, so running both would produce neither.
+        let mut app = updated(30, 10);
+        let _ = app.handle_key(press(KeyCode::Char('z')));
+        assert_eq!(app.drive, Drive::AutoZoom);
+        let _ = app.handle_key(press(KeyCode::Char('o')));
+        assert_eq!(app.drive, Drive::JuliaOrbit);
+        let _ = app.handle_key(press(KeyCode::Char('o')));
+        assert_eq!(app.drive, Drive::Still, "a second press must turn it off");
+    }
+
+    #[test]
+    fn cycling_composes_with_a_drive_rather_than_replacing_it() {
+        // It changes only the shader, so it can run during a dive.
+        let area = Rect::new(0, 0, 30, 10);
+        let mut app = updated(30, 10);
+        let _ = app.handle_key(press(KeyCode::Char('c')));
+        let _ = app.handle_key(press(KeyCode::Char('z')));
+        animate(&mut app, area, 20, Duration::from_millis(50));
+        assert!(app.cycling && app.drive == Drive::AutoZoom);
+        assert!(app.shader.phase > 0.0, "the palette stopped cycling");
+        assert!(app.magnification() > 1.0, "the dive stopped");
+    }
+
+    #[test]
+    fn a_still_app_does_not_move_on_its_own() {
+        // No drive and no cycling means an idle frame must be identical, or the
+        // renderer would burn the kernel on a static picture forever.
+        let area = Rect::new(0, 0, 30, 10);
+        let mut app = updated(30, 10);
+        let cells = app.cells.clone();
+        let sampled_for = app.sampled_for;
+        animate(&mut app, area, 30, Duration::from_millis(33));
+        assert_eq!(app.cells, cells);
+        assert_eq!(app.sampled_for, sampled_for);
     }
 
     #[test]
@@ -989,6 +1449,10 @@ mod tests {
             KeyCode::Char('p'),
             KeyCode::Char('m'),
             KeyCode::Char('i'),
+            KeyCode::Char('c'),
+            KeyCode::Char('o'),
+            KeyCode::Char('z'),
+            KeyCode::Char(' '),
         ] {
             assert_eq!(app.handle_key(press(code)), Flow::Continue, "{code:?}");
         }

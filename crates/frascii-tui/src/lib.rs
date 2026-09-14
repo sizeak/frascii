@@ -23,6 +23,7 @@
 // `private_intra_doc_links` warning and fail the doc lane.
 
 mod app;
+mod clock;
 mod error;
 mod oklab;
 mod palette;
@@ -34,7 +35,7 @@ mod widget;
 #[cfg(test)]
 mod render_tests;
 
-pub use app::{App, Flow};
+pub use app::{App, Drive, Flow};
 pub use error::{Result, TuiError};
 pub use palette::Palette;
 pub use ramp::RAMP;
