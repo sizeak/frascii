@@ -31,6 +31,10 @@
 //! does — what differs between them is a *number*, [`Viewport::sample_aspect`],
 //! which the frontend supplies.
 //!
+//! Adding a fractal is a [`formula::Formula`] impl and a [`Fractal`] that binds
+//! it — the escape loop, the bailout and the continuous count are shared, so a
+//! new kernel cannot drift from the others on any of them.
+//!
 //! Note the two senses of "grid", because conflating them is what would pull
 //! presentation down here: a **sample grid** ([`SampleGrid`]) of [`Escape`]
 //! values is this crate's output and frontend-agnostic; a **cell grid** of
@@ -38,6 +42,7 @@
 
 mod complex;
 mod escape;
+pub mod formula;
 mod fractal;
 mod kernel;
 mod sample;
@@ -47,7 +52,8 @@ mod viewport;
 
 pub use complex::Complex;
 pub use escape::{BAILOUT, escape_time};
-pub use fractal::{Fractal, Julia, Mandelbrot};
+pub use formula::Formula;
+pub use fractal::{BurningShip, Celtic, Fractal, Julia, Mandelbrot, Multibrot3, Tricorn};
 pub use kernel::{JULIA_DEFAULT, Kernel};
 pub use sample::SampleGrid;
 pub use sampler::sample_into;

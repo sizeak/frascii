@@ -3,6 +3,7 @@
 use crate::Escape;
 use crate::complex::Complex;
 use crate::escape::escape_time;
+use crate::formula::{self, Formula};
 
 /// An escape-time fractal.
 ///
@@ -16,6 +17,13 @@ pub trait Fractal: Send + Sync {
 
     /// The fractal's name, for a status line.
     fn name(&self) -> &'static str;
+
+    /// A view framing the whole set, as a centre and half-width.
+    ///
+    /// Each fractal needs its own: they sit in different places on the plane,
+    /// and one shared framing would open several of them off-centre or empty.
+    /// The values are measured from each set's bounding box.
+    fn home(&self) -> (Complex, f64);
 }
 
 /// The Mandelbrot set: `z₀ = 0`, and the sampled point is `c`.
@@ -26,15 +34,101 @@ impl Fractal for Mandelbrot {
     fn escape(&self, p: Complex, limit: u32) -> Escape {
         // The cheap interior test first: it is exact, so this is not an
         // approximation, just a shortcut past the loop.
+        //
+        // It is Mandelbrot's alone. The cardioid is a fact about *this*
+        // formula's parameter plane — the sets below are different shapes, and
+        // applying it to them would wrongly declare points interior.
         if in_main_cardioid_or_bulb(p) {
             return Escape::Interior;
         }
-        escape_time(Complex::ZERO, p, limit)
+        escape_time::<formula::Quadratic>(Complex::ZERO, p, limit)
     }
 
     fn name(&self) -> &'static str {
         "mandelbrot"
     }
+
+    fn home(&self) -> (Complex, f64) {
+        home_of::<formula::Quadratic>()
+    }
+}
+
+/// The Burning Ship, `z → (|Re z| + i|Im z|)² + c`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BurningShip;
+
+impl Fractal for BurningShip {
+    fn escape(&self, p: Complex, limit: u32) -> Escape {
+        escape_time::<formula::BurningShip>(Complex::ZERO, p, limit)
+    }
+
+    fn name(&self) -> &'static str {
+        "burning ship"
+    }
+
+    fn home(&self) -> (Complex, f64) {
+        home_of::<formula::BurningShip>()
+    }
+}
+
+/// The Tricorn, `z → conj(z)² + c`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Tricorn;
+
+impl Fractal for Tricorn {
+    fn escape(&self, p: Complex, limit: u32) -> Escape {
+        escape_time::<formula::Tricorn>(Complex::ZERO, p, limit)
+    }
+
+    fn name(&self) -> &'static str {
+        "tricorn"
+    }
+
+    fn home(&self) -> (Complex, f64) {
+        home_of::<formula::Tricorn>()
+    }
+}
+
+/// The Celtic, `z → |Re(z²)| + i·Im(z²) + c`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Celtic;
+
+impl Fractal for Celtic {
+    fn escape(&self, p: Complex, limit: u32) -> Escape {
+        escape_time::<formula::Celtic>(Complex::ZERO, p, limit)
+    }
+
+    fn name(&self) -> &'static str {
+        "celtic"
+    }
+
+    fn home(&self) -> (Complex, f64) {
+        home_of::<formula::Celtic>()
+    }
+}
+
+/// The degree-3 Multibrot, `z → z³ + c`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Multibrot3;
+
+impl Fractal for Multibrot3 {
+    fn escape(&self, p: Complex, limit: u32) -> Escape {
+        escape_time::<formula::Cubic>(Complex::ZERO, p, limit)
+    }
+
+    fn name(&self) -> &'static str {
+        "multibrot³"
+    }
+
+    fn home(&self) -> (Complex, f64) {
+        home_of::<formula::Cubic>()
+    }
+}
+
+/// A formula's framing, as the `Fractal` trait wants it.
+fn home_of<F: Formula>() -> (Complex, f64) {
+    let (re, im) = F::HOME_CENTRE;
+    (Complex::new(re, im), F::HOME_HALF_WIDTH)
 }
 
 /// A Julia set: the sampled point is `z₀`, and `c` is the set's parameter.
@@ -74,11 +168,18 @@ impl Fractal for Julia {
         // is a fact about the *Mandelbrot parameter plane*. Applying it to a
         // Julia set would be nonsense, which is why the test lives on
         // `Mandelbrot::escape` rather than inside the shared loop.
-        escape_time(p, self.c, limit)
+        escape_time::<formula::Quadratic>(p, self.c, limit)
     }
 
     fn name(&self) -> &'static str {
         "julia"
+    }
+
+    fn home(&self) -> (Complex, f64) {
+        // A Julia set lives in the *dynamical* plane, not the parameter plane,
+        // and is always contained in the disc of radius 2 — so its framing is
+        // its own rather than the quadratic's parameter-plane framing.
+        (Complex::ZERO, 1.7)
     }
 }
 
@@ -129,7 +230,7 @@ mod tests {
                     -1.25 + 2.5 * f64::from(iy) / 60.0,
                 );
                 let fast = Mandelbrot.escape(p, LIMIT);
-                let slow = escape_time(Complex::ZERO, p, LIMIT);
+                let slow = escape_time::<formula::Quadratic>(Complex::ZERO, p, LIMIT);
                 assert_eq!(
                     fast.is_interior(),
                     slow.is_interior(),

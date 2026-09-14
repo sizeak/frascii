@@ -2,6 +2,7 @@
 
 use crate::Escape;
 use crate::complex::Complex;
+use crate::formula::Formula;
 
 /// The bailout radius.
 ///
@@ -18,48 +19,52 @@ pub const BAILOUT: f64 = 256.0;
 /// never takes a square root.
 const BAILOUT_SQ: f64 = BAILOUT * BAILOUT;
 
-/// Iterate `z -> z² + c` from `z0` until it escapes or `limit` is reached.
+/// Iterate `F` from `z0` until it escapes or `limit` is reached.
 ///
-/// This is the whole of the maths. A kernel's job is only to decide what `z0`
-/// and `c` are for a given point on the plane — Mandelbrot fixes `z0` and
-/// varies `c`, Julia does the reverse — which is why there is one loop here and
-/// not one per fractal.
+/// This is the whole of the maths. A kernel decides two things and no more:
+/// which [`Formula`] to iterate, and what `z0` and `c` are for a given point —
+/// Mandelbrot fixes `z0` and varies `c`, Julia does the reverse. That is why
+/// there is one loop here and not one per fractal.
+///
+/// Generic over the formula, so each one monomorphises into its own specialised
+/// loop: a cubic pays no branch for being a cubic.
 ///
 /// # Smooth iteration count
 ///
 /// `Escaped::smooth` is the continuous escape time,
-/// `n - log₂(ln|z| / ln BAILOUT)`, which places a point *within* its escape
-/// band instead of only naming the band. A renderer that colours by the integer
-/// count draws visible contour steps; this is what lets it interpolate.
+/// `n - log_d(ln|z| / ln BAILOUT)` for a formula of degree `d`, which places a
+/// point *within* its escape band instead of only naming the band. A renderer
+/// that colours by the integer count draws visible contour steps; this is what
+/// lets it interpolate.
+///
+/// **The degree is not decoration.** The value is continuous precisely because
+/// one further iteration raises the count by one while multiplying `ln|z|` by
+/// the degree, so the two cancel. Use 2 for a cubic and they do not: the value
+/// jumps by 0.585 at every band boundary — measured — which renders as banding
+/// and looks nothing like a wrong constant.
 ///
 /// The value is clamped to be non-negative. It can only go negative when `z0`
 /// is already outside the bailout radius before a single iteration runs — which
 /// Mandelbrot cannot do (`z0` is the origin) but Julia can, since there `z0` is
 /// the sampled point and the view may extend past `|z| = 256`.
 #[must_use]
-pub fn escape_time(z0: Complex, c: Complex, limit: u32) -> Escape {
-    // Raw f64 rather than `Complex` arithmetic: the expanded form reuses
-    // `zr2`/`zi2` for both the escape test and the next `z`, where going
-    // through `Mul` would square each component twice per iteration.
+pub fn escape_time<F: Formula>(z0: Complex, c: Complex, limit: u32) -> Escape {
     let mut zr = z0.re;
     let mut zi = z0.im;
     let (cr, ci) = (c.re, c.im);
 
     for n in 0..limit {
-        let zr2 = zr * zr;
-        let zi2 = zi * zi;
-        let mag_sq = zr2 + zi2;
-
+        let mag_sq = zr * zr + zi * zi;
         if mag_sq > BAILOUT_SQ {
             return Escape::Escaped {
                 iterations: n,
-                smooth: smooth_count(n, mag_sq),
+                smooth: smooth_count(n, mag_sq, F::DEGREE),
             };
         }
 
-        // `zi` first: it reads the pre-update `zr`.
-        zi = 2.0 * zr * zi + ci;
-        zr = zr2 - zi2 + cr;
+        let next = F::step(zr, zi, cr, ci);
+        zr = next.0;
+        zi = next.1;
     }
 
     Escape::Interior
@@ -67,10 +72,10 @@ pub fn escape_time(z0: Complex, c: Complex, limit: u32) -> Escape {
 
 /// The continuous escape time for a point that escaped on iteration `n` with
 /// squared magnitude `mag_sq`.
-fn smooth_count(n: u32, mag_sq: f64) -> f64 {
+fn smooth_count(n: u32, mag_sq: f64, degree: f64) -> f64 {
     // ln|z| = ln(√mag_sq) = ½·ln(mag_sq), which avoids the square root.
     let log_zn = 0.5 * mag_sq.ln();
-    let nu = f64::from(n) - (log_zn / BAILOUT.ln()).ln() / core::f64::consts::LN_2;
+    let nu = f64::from(n) - (log_zn / BAILOUT.ln()).ln() / degree.ln();
     nu.max(0.0)
 }
 
@@ -78,9 +83,11 @@ fn smooth_count(n: u32, mag_sq: f64) -> f64 {
 mod tests {
     use super::*;
 
+    use crate::formula::{Cubic, Quadratic};
+
     /// Mandelbrot's binding: `z0` is the origin, `c` is the sampled point.
     fn mandel(re: f64, im: f64, limit: u32) -> Escape {
-        escape_time(Complex::ZERO, Complex::new(re, im), limit)
+        escape_time::<Quadratic>(Complex::ZERO, Complex::new(re, im), limit)
     }
 
     #[test]
@@ -161,12 +168,61 @@ mod tests {
     fn a_seed_already_past_the_bailout_is_clamped_to_zero() {
         // Julia can sample a point outside |z| = 256; the smooth count must not
         // go negative there.
-        let escape = escape_time(Complex::new(1e6, 0.0), Complex::new(0.0, 0.0), 50);
+        let escape = escape_time::<Quadratic>(Complex::new(1e6, 0.0), Complex::new(0.0, 0.0), 50);
         let Escape::Escaped { iterations, smooth } = escape else {
             panic!("a huge seed escapes immediately");
         };
         assert_eq!(iterations, 0);
         assert_eq!(smooth, 0.0);
+    }
+
+    #[test]
+    fn the_smooth_count_is_invariant_under_one_more_iteration() {
+        // **The property the degree exists for**, and the reason it cannot be
+        // hardcoded to 2. The continuous count is defined so that overshooting
+        // the bailout by a further iteration does not change it: the count
+        // rises by one while `ln|z|` is multiplied by the degree, and the two
+        // cancel. With the wrong degree they do not, and the value jumps by
+        // 0.585 at every band boundary — which renders as banding.
+        //
+        // Checked by running past the bailout on purpose and recomputing.
+        fn overshoot<F: crate::formula::Formula>(cr: f64) -> (f64, f64) {
+            let (mut zr, mut zi) = (0.0, 0.0);
+            let mut n = 0;
+            while zr * zr + zi * zi <= BAILOUT_SQ && n < 5_000 {
+                let next = F::step(zr, zi, cr, 0.0);
+                zr = next.0;
+                zi = next.1;
+                n += 1;
+            }
+            let at_escape = smooth_count(n, zr * zr + zi * zi, F::DEGREE);
+            let next = F::step(zr, zi, cr, 0.0);
+            let one_more = smooth_count(n + 1, next.0 * next.0 + next.1 * next.1, F::DEGREE);
+            (at_escape, one_more)
+        }
+
+        let (a, b) = overshoot::<Quadratic>(1.35);
+        assert!((a - b).abs() < 1e-9, "quadratic: {a} vs {b}");
+
+        let (a, b) = overshoot::<Cubic>(1.35);
+        assert!((a - b).abs() < 1e-9, "cubic: {a} vs {b}");
+
+        // And the wrong degree genuinely breaks it, so the test has teeth.
+        let (mut zr, mut zi) = (0.0, 0.0);
+        let mut n = 0;
+        while zr * zr + zi * zi <= BAILOUT_SQ && n < 5_000 {
+            let next = Cubic::step(zr, zi, 1.35, 0.0);
+            zr = next.0;
+            zi = next.1;
+            n += 1;
+        }
+        let wrong = smooth_count(n, zr * zr + zi * zi, 2.0);
+        let next = Cubic::step(zr, zi, 1.35, 0.0);
+        let wrong_next = smooth_count(n + 1, next.0 * next.0 + next.1 * next.1, 2.0);
+        assert!(
+            (wrong - wrong_next).abs() > 0.5,
+            "using degree 2 for a cubic should be visibly discontinuous"
+        );
     }
 
     #[test]

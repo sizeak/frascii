@@ -44,6 +44,14 @@ pub struct Viewport {
     pub cols: usize,
     /// Samples down.
     pub rows: usize,
+    /// The half-width this view started from.
+    ///
+    /// [`Viewport::magnification`] is measured against this rather than a fixed
+    /// constant, because each fractal frames its own set and they are different
+    /// sizes. Against a shared reference a Julia set would read 1.03× while
+    /// sitting at its own home view, which is not what "how far have I zoomed"
+    /// means to anyone.
+    pub home_half_width: f64,
     /// A sample's height divided by its width, in plane units.
     ///
     /// This is the whole of what a frontend's geometry contributes, and the one
@@ -74,6 +82,7 @@ impl Viewport {
         Self {
             centre: HOME_CENTRE,
             half_width: HOME_HALF_WIDTH,
+            home_half_width: HOME_HALF_WIDTH,
             cols,
             rows,
             sample_aspect,
@@ -198,10 +207,20 @@ impl Viewport {
         self.sample_aspect = sample_aspect;
     }
 
-    /// How far in the view is zoomed, relative to the home view.
+    /// Re-frame onto a new home, resetting the magnification to 1.
+    ///
+    /// Sets both the current width and the reference it is measured against, so
+    /// a fractal always reads 1× at its own starting view.
+    pub const fn frame(&mut self, centre: Complex, half_width: f64) {
+        self.centre = centre;
+        self.half_width = half_width;
+        self.home_half_width = half_width;
+    }
+
+    /// How far in the view is zoomed, relative to the view it started from.
     #[must_use]
     pub fn magnification(&self) -> f64 {
-        HOME_HALF_WIDTH / self.half_width
+        self.home_half_width / self.half_width
     }
 
     /// How much `f64` precision remains at this magnification.
@@ -343,6 +362,28 @@ mod tests {
         assert!((v.magnification() - 1.0).abs() < 1e-12);
         v.zoom_centre(0.5);
         assert!((v.magnification() - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn re_framing_resets_the_magnification_to_one() {
+        // Each fractal frames its own set and they are different sizes, so
+        // magnification has to be relative to where *this* view started. Against
+        // a shared constant a smaller set would read 1.03× while sitting at its
+        // own home, which is not what the number means to a reader.
+        let mut v = vp();
+        v.zoom_centre(0.01);
+        assert!(v.magnification() > 50.0);
+
+        v.frame(Complex::new(-0.51, -0.54), 1.9);
+        assert!(
+            (v.magnification() - 1.0).abs() < 1e-12,
+            "re-framing left it at {}",
+            v.magnification()
+        );
+
+        // And zooming from the new home is measured against the new home.
+        v.zoom_centre(0.25);
+        assert!((v.magnification() - 4.0).abs() < 1e-12);
     }
 
     #[test]

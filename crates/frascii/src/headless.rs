@@ -138,6 +138,10 @@ pub(crate) fn run(options: &Options) -> std::io::Result<Report> {
     let mut grid = SampleGrid::new(0, 0);
 
     let mut viewport = Viewport::home(options.cols, options.rows, 1.0);
+    // Each fractal sits somewhere different on the plane, so frame the one
+    // actually being rendered rather than the Mandelbrot's view.
+    let (centre, half_width) = options.kernel.home();
+    viewport.frame(centre, half_width);
     if options.magnification > 1.0 {
         dive_to(
             &mut viewport,
@@ -216,18 +220,24 @@ fn write_ppm(path: &Path, grid: &SampleGrid) -> std::io::Result<()> {
     let mut file = BufWriter::new(File::create(path)?);
     writeln!(file, "P5\n{} {}\n255", grid.cols(), grid.rows())?;
 
-    // Scale against the brightest escape actually present, so the image uses
-    // its full range at any iteration limit.
+    // Scale against the brightest escape present, so the image uses its full
+    // range at any iteration limit — and **log-compressed**, which is not a
+    // cosmetic choice. Escape times are log-distributed: most exterior samples
+    // escape in one to twenty iterations against a peak in the hundreds, so a
+    // linear map collapses nearly the whole picture to black. The first version
+    // did exactly that, and the resulting images were unusable for the one thing
+    // this file exists for — checking the geometry.
     let peak = grid
         .samples()
         .filter_map(|e| e.smooth())
         .fold(1.0_f64, f64::max);
+    let scale = (1.0 + peak).ln();
 
     for iy in 0..grid.rows() {
         for ix in 0..grid.cols() {
             let value = match grid.get(ix, iy) {
                 Some(Escape::Escaped { smooth, .. }) => {
-                    let t = (smooth / peak).clamp(0.0, 1.0);
+                    let t = ((1.0 + smooth).ln() / scale).clamp(0.0, 1.0);
                     (t * 255.0) as u8
                 }
                 _ => 0,
@@ -377,6 +387,39 @@ mod tests {
             "it cannot have reached {:.3e}",
             report.magnification
         );
+    }
+
+    #[test]
+    fn the_image_uses_its_range_rather_than_collapsing_to_black() {
+        // The whole point of the file: it has to show the geometry. A linear
+        // map of escape times does not — they are log-distributed, so nearly
+        // every exterior sample lands within a few units of black and the image
+        // is a silhouette with some speckle.
+        let dir = std::env::temp_dir().join(format!("frascii-range-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("out.pgm");
+
+        let mut o = options();
+        o.cols = 80;
+        o.rows = 40;
+        o.limit = Some(400);
+        o.ppm = Some(path.clone());
+        run(&o).expect("writes a pgm");
+
+        let bytes = std::fs::read(&path).expect("pgm exists");
+        let body = &bytes[bytes.iter().position(|b| *b == b'\n').unwrap()..];
+        let lit: Vec<u8> = body.iter().copied().filter(|v| *v > 0).collect();
+        assert!(!lit.is_empty(), "every pixel was black");
+
+        let mean = lit.iter().map(|v| u32::from(*v)).sum::<u32>() / lit.len() as u32;
+        assert!(
+            mean > 60,
+            "exterior averages {mean}/255 — too dark to read the geometry from"
+        );
+        let distinct: std::collections::BTreeSet<u8> = lit.iter().copied().collect();
+        assert!(distinct.len() > 20, "only {} shades", distinct.len());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -64,6 +64,10 @@ fn run_headless(cli: &Cli) -> ExitCode {
         kernel: match cli.fractal {
             FractalArg::Mandelbrot => Kernel::Mandelbrot,
             FractalArg::Julia => Kernel::Julia { c: JULIA_DEFAULT },
+            FractalArg::BurningShip => Kernel::BurningShip,
+            FractalArg::Tricorn => Kernel::Tricorn,
+            FractalArg::Celtic => Kernel::Celtic,
+            FractalArg::Multibrot3 => Kernel::Multibrot3,
         },
         ppm: cli.ppm.clone(),
     };

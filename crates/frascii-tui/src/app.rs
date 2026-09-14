@@ -228,7 +228,7 @@ impl App {
     #[must_use]
     pub fn new() -> Self {
         let mode = CellMode::default();
-        Self {
+        let mut app = Self {
             params: SampleParams {
                 // Zero-sized until the first `update` learns the terminal's
                 // size. Sampling a zero grid is legal and costs nothing, so
@@ -274,7 +274,11 @@ impl App {
             dive_rate: DIVE_RATE_DEFAULT,
             dived_from: 1.0,
             retarget_pending: false,
-        }
+        };
+        // Frame whatever the default kernel is, rather than assuming it is the
+        // one whose home `Viewport::home` happens to use.
+        app.frame_home();
+        app
     }
 
     /// The palette currently in use, for a status line.
@@ -417,9 +421,19 @@ impl App {
     /// The palette and fractal are deliberately left alone: `r` means "I have
     /// zoomed somewhere useless, take me back", not "undo everything".
     fn reset(&mut self) {
-        let viewport = &mut self.params.viewport;
-        *viewport = Viewport::home(viewport.cols, viewport.rows, viewport.sample_aspect);
+        self.frame_home();
         self.limit_bias = 0;
+    }
+
+    /// Frame the current kernel's whole set.
+    ///
+    /// Each fractal has its own home, because they sit in different places on
+    /// the plane: framing the Burning Ship with the Mandelbrot's view would put
+    /// it half off-screen, and the Multibrot nearly fills a view sized for
+    /// neither.
+    fn frame_home(&mut self) {
+        let (centre, half_width) = self.params.kernel.home();
+        self.params.viewport.frame(centre, half_width);
     }
 
     /// Switch to the next fractal.
@@ -498,11 +512,7 @@ impl App {
         // loop — where stopping a couple of decades early keeps every frame
         // sharp. The clamp still exists to refuse a manual zoom.
         if self.params.viewport.precision() != Precision::Ample {
-            self.params.viewport = Viewport::home(
-                self.params.viewport.cols,
-                self.params.viewport.rows,
-                self.params.viewport.sample_aspect,
-            );
+            self.frame_home();
             self.limit_bias = 0;
             self.dived_from = 1.0;
             self.retarget_pending = true;
@@ -1221,8 +1231,9 @@ mod tests {
         let _ = app.handle_key(press(KeyCode::Char('.')));
         let _ = app.handle_key(press(KeyCode::Char('r')));
 
-        let home = Viewport::home(60, 19, app.params.viewport.sample_aspect);
-        assert_eq!(app.params.viewport, home);
+        let (centre, half_width) = app.params.kernel.home();
+        assert_eq!(app.params.viewport.centre, centre);
+        assert!((app.params.viewport.half_width - half_width).abs() < 1e-12);
         assert_eq!(app.limit_bias, 0);
         assert_eq!(app.palette_name(), palette, "reset changed the palette");
         assert_eq!(app.kernel_name(), kernel, "reset changed the fractal");
@@ -1240,8 +1251,63 @@ mod tests {
         }
         let _ = app.handle_key(press(KeyCode::Tab));
         assert_eq!(app.kernel_name(), "julia");
-        assert!((app.params.viewport.magnification() - 1.0).abs() < 1e-12);
+        // Re-framed onto Julia's own home, so the magnification reads 1 —
+        // not 1.03, which is what a shared reference width would have given.
+        assert!(
+            (app.params.viewport.magnification() - 1.0).abs() < 1e-12,
+            "{}",
+            app.params.viewport.magnification()
+        );
 
+        let _ = app.handle_key(press(KeyCode::Tab));
+        assert_eq!(app.kernel_name(), "burning ship");
+    }
+
+    #[test]
+    fn every_kernel_is_reachable_and_frames_itself() {
+        // Tab cycles all six, and each arrives framed on its own set rather
+        // than on the previous one's view.
+        let area = Rect::new(0, 0, 60, 24);
+        let mut app = updated(60, 24);
+        let mut seen = vec![app.kernel_name()];
+
+        for _ in 1..6 {
+            let _ = app.handle_key(press(KeyCode::Tab));
+            app.update(area, Instant::now());
+            seen.push(app.kernel_name());
+
+            let (centre, half_width) = app.params.kernel.home();
+            assert_eq!(
+                app.params.viewport.centre,
+                centre,
+                "{} unframed",
+                app.kernel_name()
+            );
+            assert!((app.params.viewport.half_width - half_width).abs() < 1e-12);
+
+            // And it renders something, rather than a blank or a solid block.
+            let glyphs: std::collections::BTreeSet<char> =
+                app.cells.cells().map(|c| c.glyph).collect();
+            assert!(
+                glyphs.len() >= 4,
+                "{} rendered {} distinct glyphs",
+                app.kernel_name(),
+                glyphs.len()
+            );
+        }
+        assert_eq!(
+            seen,
+            vec![
+                "mandelbrot",
+                "julia",
+                "burning ship",
+                "tricorn",
+                "celtic",
+                "multibrot³"
+            ]
+        );
+
+        // And it wraps.
         let _ = app.handle_key(press(KeyCode::Tab));
         assert_eq!(app.kernel_name(), "mandelbrot");
     }

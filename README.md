@@ -55,7 +55,7 @@ Options:
       --rows <N>           Samples down [default: 100]
       --limit <N>          Iteration limit (default: scaled to the magnification)
       --magnification <X>  Magnification to render at [default: 1]
-      --fractal <FRACTAL>  Which fractal to render [mandelbrot, julia]
+      --fractal <FRACTAL>  Which fractal to render
       --ppm <FILE>         Write the last frame as a binary PPM
   -h, --help               Print help
   -V, --version            Print version
@@ -92,7 +92,7 @@ tail -f target/frascii.log      # ... in another terminal
 | `+` / `=`, `-` | Zoom in / out |
 | `.` / `,` | Raise / lower the iteration limit |
 | `r` | Reset the view |
-| `Tab` / `f` | Next fractal (Mandelbrot, Julia) |
+| `Tab` / `f` | Next fractal |
 | `p` | Next palette |
 | `m` | Glyph / half-block rendering |
 | `s` | Supersampling: 1× / 2× / 3× |
@@ -104,6 +104,23 @@ tail -f target/frascii.log      # ... in another terminal
 | `z` | Unattended auto-zoom |
 | `Space` | Pause all motion |
 | `q` / `Esc` / `Ctrl+C` | Quit |
+
+### Fractals
+
+Six, cycled with `Tab`:
+
+| | iteration | |
+|---|---|---|
+| Mandelbrot | `z → z² + c` | the classic |
+| Julia | `z → z² + c` | `c` fixed, the sampled point is the seed; `o` walks it around a path |
+| Burning Ship | `z → (\|Re z\| + i\|Im z\|)² + c` | the absolute values break the mirror symmetry, which is its whole look |
+| Tricorn | `z → conj(z)² + c` | three concave lobes |
+| Celtic | `z → \|Re(z²)\| + i·Im(z²) + c` | |
+| Multibrot³ | `z → z³ + c` | two-fold symmetry |
+
+Each frames its own set on arrival — they sit in different places on the plane, and the framings are measured from each set's bounding box rather than guessed. Magnification is relative to whichever fractal you are on, so every one reads 1× at its own home view.
+
+Adding another is a `Formula` impl — the per-iteration step, its degree, and where its set lives — plus a `Fractal` that binds it. The escape loop, the bailout and the continuous escape count are shared, so a new kernel cannot drift from the others on any of them.
 
 `s` supersamples: each output pixel averages a `k × k` block of samples, which antialiases the boundary instead of snapping each cell to whichever sample landed at its centre. Colours are averaged *after* the palette and in linear light — averaging iteration counts and colouring once would give a boundary cell a colour belonging to neither side, and averaging sRGB bytes would make every mixed edge too dark.
 

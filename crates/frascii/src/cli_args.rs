@@ -82,6 +82,14 @@ pub(crate) enum FractalArg {
     Mandelbrot,
     /// The default Julia set.
     Julia,
+    /// The Burning Ship.
+    BurningShip,
+    /// The Tricorn, or Mandelbar.
+    Tricorn,
+    /// The Celtic.
+    Celtic,
+    /// The degree-3 Multibrot.
+    Multibrot3,
 }
 
 /// The `tracing` filter directive for a `-v` count.

@@ -90,8 +90,8 @@ Named so nobody has to guess whether it was forgotten.
 
 In **`frascii-core`**:
 
-- supersampling, if any
-- more fractals beyond Mandelbrot and Julia (the `Fractal` trait is the seam)
+- fractals that do not fit the escape-time shape at all — Newton's method classifies by *which root* an orbit converges to, so `Escape` does not describe it and it would need its own result type
+- Phoenix and other formulas needing the previous `z`, which the current `Formula::step` signature does not carry
 
 In **`frascii-tui`** — presentation and dispatch:
 
@@ -118,6 +118,10 @@ The dive also stops at `Precision::Marginal` rather than at the hard clamp. Reac
 Half-block landed in increment 4 and **the aspect-absorption claim held**: `switching_mode_keeps_the_same_view` zooms and pans, presses `m`, and asserts the centre, width and height of the plane region are unchanged while the sample lattice doubles and the aspect halves. Nothing in core needed touching — the mode is a `CellMode` variant, a subdivision pair, and a blit.
 
 Two things that came out of building it. Half-block mode gets **no render snapshot**: `TestBackend` captures symbols only and every cell in that mode is `▀`, so a snapshot would be a uniform rectangle that passes whatever the picture does — coverage in appearance only. The packing is asserted directly instead. And a `Paragraph` overlay **recolours** a row without overwriting the glyphs under it, so the status line needed a `Clear` first or the fractal showed through to the right of the text.
+
+**A formula's degree is load-bearing, not decoration.** The continuous escape count divides by `ln(degree)`, and that is exactly what makes it invariant under one more iteration: the count rises by one while `ln|z|` is multiplied by the degree, and the two cancel. Hardcode 2 for a cubic and they do not — the value jumps by 0.585 at every band boundary, which renders as banding and looks nothing like a wrong constant. `the_smooth_count_is_invariant_under_one_more_iteration` checks both directions, including that the wrong degree genuinely breaks it.
+
+**Each fractal frames its own set**, with the framings measured from bounding boxes rather than guessed, and `Viewport::magnification` is relative to `home_half_width` rather than a shared constant — otherwise a smaller set reads 1.03× while sitting at its own home view, which is not what the number means to a reader.
 
 `Kernel` is the reason the fractal can live in `SampleParams`: an enum is `Copy + PartialEq` where a `Box<dyn Fractal>` is neither, so a trait object there would have silently broken the comparison that decides whether to re-sample. It also moves dispatch out of the inner loop — `Kernel::sample_into` matches once per frame and hands the sampler a concrete type, where `&dyn Fractal` cost an indirect call per *sample*. That second benefit went unmeasured: on a machine at load average 7, eight repeats of the same binary spread 113–145µs, so the difference is well inside the noise. The enum is justified by what it is *required* for, not by a speedup anyone has demonstrated.
 
