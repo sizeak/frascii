@@ -1,0 +1,7 @@
+---
+source: crates/frascii-tui/src/render_tests.rs
+expression: "frame(8, 3)"
+---
+":::--*-:"
+":     -:"
+":::--*-:"

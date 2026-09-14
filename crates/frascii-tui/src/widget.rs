@@ -37,7 +37,10 @@ impl Widget for &Grid {
                     continue;
                 };
                 if let Some(target) = buf.cell_mut((area.x + x, area.y + y)) {
-                    target.set_char(cell.glyph).set_fg(to_colour(cell.colour));
+                    target
+                        .set_char(cell.glyph)
+                        .set_fg(to_colour(cell.colour))
+                        .set_bg(to_colour(cell.background));
                 }
             }
         }

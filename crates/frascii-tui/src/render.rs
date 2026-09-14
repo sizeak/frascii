@@ -11,8 +11,6 @@
 //! that stays a file move. The ratatui half is next door in
 //! [`crate::widget`].
 
-use frascii_core::Escape;
-
 /// A 24-bit colour.
 ///
 /// Truecolour is the target rather than a 256-colour cube: the whole point of a
@@ -40,29 +38,56 @@ impl Rgb {
     }
 }
 
-/// One character cell of rendered output: what to draw, and in what colour.
+/// One character cell of rendered output: a glyph, its colour, and what sits
+/// behind it.
 ///
-/// A cell carries no background and no attributes yet. Both are as much a
-/// question of what a frontend can express as of what the renderer decides, so
-/// they are left out until something needs them rather than guessed at now.
+/// A struct with three fields rather than an enum over render modes. An enum
+/// would mean a branch per cell inside the ratatui blit and would cost [`Grid`]
+/// its uniform `Copy` layout, for a distinction the blit can make once per
+/// frame instead of once per cell.
+///
+/// Note that a rendered frame sets `background` explicitly on every cell, so
+/// frascii paints over the user's terminal theme rather than letting it show
+/// through. That is deliberate — a fractal with the user's background bleeding
+/// into the interior would be a different picture on every terminal — but it is
+/// a choice, not an accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cell {
     /// The glyph to draw.
     pub glyph: char,
     /// The glyph's foreground colour.
     pub colour: Rgb,
+    /// What sits behind the glyph.
+    pub background: Rgb,
 }
 
 impl Cell {
-    /// A cell with the given glyph and colour.
+    /// A cell with the given glyph and colour, on black.
     #[must_use]
     pub const fn new(glyph: char, colour: Rgb) -> Self {
-        Self { glyph, colour }
+        Self {
+            glyph,
+            colour,
+            background: Rgb::BLACK,
+        }
+    }
+
+    /// A cell with an explicit background.
+    ///
+    /// What half-block mode will use: one glyph, two independently coloured
+    /// halves.
+    #[must_use]
+    pub const fn with_background(glyph: char, colour: Rgb, background: Rgb) -> Self {
+        Self {
+            glyph,
+            colour,
+            background,
+        }
     }
 }
 
 impl Default for Cell {
-    /// A blank cell — a space, in black.
+    /// A blank cell — a space, black on black.
     fn default() -> Self {
         Self::new(' ', Rgb::BLACK)
     }
@@ -155,21 +180,6 @@ impl Grid {
     }
 }
 
-/// Placeholder for the escape-to-cell mapping, so the crate boundary is
-/// exercised by something other than a type declaration.
-///
-/// It is not the design: interior points are black and every escaped point gets
-/// the same glyph and colour, which is to say it draws a silhouette. The glyph
-/// ramp, the palette and the interpolation across the continuous iteration
-/// count all replace this.
-#[must_use]
-pub fn placeholder_cell(escape: Escape) -> Cell {
-    match escape {
-        Escape::Interior => Cell::new(' ', Rgb::BLACK),
-        Escape::Escaped { .. } => Cell::new('#', Rgb::new(0xff, 0xff, 0xff)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,15 +267,5 @@ mod tests {
         grid.resize(4, 1);
         assert_eq!((grid.width(), grid.height()), (4, 1));
         assert!(grid.cells().all(|c| c == Cell::default()));
-    }
-
-    #[test]
-    fn placeholder_maps_interior_and_escaped_apart() {
-        assert_eq!(placeholder_cell(Escape::Interior).glyph, ' ');
-        let escaped = Escape::Escaped {
-            iterations: 4,
-            smooth: 4.25,
-        };
-        assert_eq!(placeholder_cell(escaped).glyph, '#');
     }
 }

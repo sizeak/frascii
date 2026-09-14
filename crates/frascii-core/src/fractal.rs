@@ -166,6 +166,67 @@ mod tests {
     }
 
     #[test]
+    fn mandelbrot_is_exactly_where_the_julia_origin_stays_bounded() {
+        // The definition of the Mandelbrot set, used as a cross-check: `c` is in
+        // it precisely when the orbit of 0 under `z -> z² + c` is bounded — which
+        // is the Julia set for that `c`, sampled at the origin. So these two must
+        // agree *bit for bit*, with no tolerance, over a dense grid.
+        //
+        // It costs nothing and pins both bindings at once. It also guards the
+        // cardioid shortcut, which only `Mandelbrot::escape` applies: if the
+        // shortcut ever disagreed with a full iteration, Mandelbrot and Julia
+        // would diverge here even though neither looks wrong on its own.
+        const LIMIT: u32 = 600;
+        for iy in 0..50 {
+            for ix in 0..70 {
+                let c = Complex::new(
+                    -2.2 + 3.0 * f64::from(ix) / 70.0,
+                    -1.2 + 2.4 * f64::from(iy) / 50.0,
+                );
+                assert_eq!(
+                    Mandelbrot.escape(c, LIMIT),
+                    Julia::new(c).escape(Complex::ZERO, LIMIT),
+                    "disagreement at c = {c:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_sets_leftmost_point_is_interior() {
+        // -2 is the tip of the antenna, and its orbit sits at |z| = 2 forever
+        // (0 -> -2 -> 2 -> 2 -> ...). It is the regression test for the escape
+        // comparison: anyone who lowers the bailout radius to 2 and writes `>=`
+        // rather than `>` loses the set's leftmost point, and nothing else in
+        // the suite would notice.
+        assert!(
+            Mandelbrot
+                .escape(Complex::new(-2.0, 0.0), 10_000)
+                .is_interior()
+        );
+    }
+
+    #[test]
+    fn the_cardioid_cusp_is_interior() {
+        // 0.25 is the cusp, where the orbit converges like 1/n rather than
+        // settling onto a cycle. It is bounded, so it must read interior — and
+        // it is the case an over-eager periodicity check would later get wrong,
+        // because the orbit never actually repeats.
+        assert!(
+            Mandelbrot
+                .escape(Complex::new(0.25, 0.0), 10_000)
+                .is_interior()
+        );
+        // Just outside, it escapes — so the test is not passing by accident of
+        // a limit that is simply too small to tell.
+        assert!(
+            !Mandelbrot
+                .escape(Complex::new(0.2501, 0.0), 100_000)
+                .is_interior()
+        );
+    }
+
+    #[test]
     fn both_kernels_name_themselves() {
         assert_eq!(Mandelbrot.name(), "mandelbrot");
         assert_eq!(Julia::default().name(), "julia");

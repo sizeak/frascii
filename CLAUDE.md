@@ -95,17 +95,163 @@ In **`frascii-core`**:
 
 In **`frascii-tui`** — presentation and dispatch:
 
-- glyph ramps, and whether density maps from escape time or perceived luminance
-- palettes, and the interpolation across `Escape::smooth`
-- half-block / braille modes, which is where `Cell` grows
+- half-block / braille modes. `Cell` already carries a background, and `CellMode` already computes lattice and aspect from a subdivision pair, so a mode is a variant plus a blit
 - the camera and animation clock's *keybindings* (the camera's own maths is core's). The clock should be `Instant`-based: an earlier tick counter incremented only on idle polls, so any keypress skipped it, and it was deleted rather than left to be built on
 - terminal colour-capability detection. It belongs *upstream* of `to_colour`, choosing which colour is produced — not in a per-cell conversion that runs tens of thousands of times a frame
 
-`App::draw` renders a splash frame. It is a bootstrap stand-in, not a start screen: the real render path replaces it.
+The render path is built: `App::update` samples (only when its `SampleParams` changed) and shades; `App::draw` blits the finished grid and nothing else. Glyph mode and nine palettes exist; half-block, interaction and motion do not.
+
+### Drawing into the terminal
+
+Researched against the vendored sources before writing any of it, because these
+are exactly the boundary claims this file says not to take on plausibility.
+
+**Write a direct `Buffer` blit; do not use ratatui's `Canvas`.** The reason is
+*not* that Canvas cannot do per-pixel colour — it can, `Painter::paint` takes a
+`Color` per point (`ratatui-widgets-0.3.2 src/canvas.rs:478`) and `Shape` is a
+one-method trait, so a custom shape can plot an arbitrary coloured grid. Only
+the bundled shapes are per-shape-coloured. The actual reasons are that
+`Context::new` runs inside `render` (`canvas.rs:880-886`), so every frame
+rebuilds `vec![vec![None; width]; height*2]` (`canvas.rs:329`) — `2·height+1`
+allocations — to fill a grid that is then re-packed into the buffer you could
+have written directly; and that `CharGrid` holds **one fixed char for the whole
+grid** (`canvas.rs:235`), so the glyph-density ramp cannot be expressed on it at
+all.
+
+**Half-block packing** (the logic worth copying, `canvas.rs:371-381`): upper
+sample → `fg`, lower sample → `bg`, glyph `▀`. **No colour is lost** when the
+two differ; both 24-bit values survive. Ratatui switches to `█` when they are
+equal, but that is cosmetic (`canvas.rs:356-357`) — always emit `▀` instead, so
+every cell stays single-width and the diff never enters its wide-character path.
+
+**1×2 half-block is the ceiling for coloured sub-cell rendering.** Braille,
+octant, quadrant and sextant all go through `PatternGrid`, which is explicitly
+one colour per cell: "there's no way to individually set the background color of
+each pseudo-pixel in a pattern character" (`canvas.rs:126-128`). Braille buys
+eight samples of *shape* and one colour — useless for a colour-mapped fractal.
+
+**Put a `BufWriter` under the backend.** `DefaultTerminal` writes through
+`stdout()` (`ratatui-0.30.2 src/init.rs:401`), which is a `LineWriter`. A full
+200×50 redraw where every cell changes both colours is ~30 bytes/cell ≈ 300 KB
+per frame, and that write volume — not ratatui — is the ceiling. Crossterm
+already emits fg and bg as a single SGR and its own comment measures ~20% more
+fps from doing so on precisely this workload (`crossterm-0.29.0
+src/style.rs:294-314`).
+
+**Mouse capture is neither enabled nor cleaned up for you.** `try_init` sets
+raw mode and the alternate screen only (`init.rs:397-403`), and `restore()` does
+not disable capture (`init.rs:554-559`). Enable it explicitly, and disable it in
+teardown *and* in the panic hook, or a crash leaves the user's shell receiving
+escape codes. `EnableMouseCapture` turns on `?1003h`, i.e. every motion event
+with no button held, so coalesce the queue or render frames behind the cursor.
+Mouse coordinates are cell-granular (`event.rs:777-789`), so zoom-to-cursor in
+half-block mode can only address the cell, not which half of it.
+
+### The render path, and why it is shaped this way
+
+Built in increment 2. Each of these was a decision the obvious implementation
+gets wrong, so the reasoning is kept rather than just the result.
+
+**Sampling and shading are two functions over two caller-owned buffers**, not
+one loop. `sample_into(grid, viewport, fractal, limit)` in core;
+`shade_into(shader, samples, cells)` in the frontend. This is not primarily
+about frame rate — it is what makes every ramp, palette and sub-cell reduction
+unit-testable against a synthetic grid of hand-written `Escape` values with no
+kernel in the test, and it is the seam a background sampler or progressive
+refinement would later plug into. Fused into one loop, the reductions get
+written against that interleaving and three render modes depend on it before
+anyone notices.
+
+**Whether to re-sample is *derived* from input equality, never a `bool` someone
+must remember to set.** Group every input that changes sample output into one
+`Copy + PartialEq` struct, keep the last one used, and compare. The test for a
+new field is one question: if this changes, must the kernel re-run? The
+iteration limit yes; the palette phase no. Cache-skipping only benefits palette
+cycling and the idle screen — Julia orbit and auto-zoom re-sample every frame by
+nature — so build the equality check and nothing more elaborate.
+
+**Neither the glyph ramp nor the palette may normalise against the iteration
+limit.** A dive raises the limit from ~300 to ~5,000, so any `smooth / limit`
+map re-shades the *entire frame* each time it steps: a whole-screen pulse,
+repeating for every step of every dive, forever, reading as a rendering glitch
+with its cause nowhere near the render code. Use a **fixed** cyclic period for
+colour (32 iterations) and a **fixed** log reference for density (512). A rising
+limit then only adds bands near the boundary and nothing already on screen
+moves — which is the behaviour you want anyway.
+
+**Density comes from escape time, not from perceived luminance** — the open
+question this file used to pose. If density tracked the palette's luminance,
+cycling the palette would change the *glyphs*, and the ASCII would shimmer;
+that reads as noise, not motion. Escape-time density keeps the shape still and
+moves only the colour, which is the point of having two channels. Log-compress
+it, because a linear map puts almost every exterior sample into one or two ramp
+steps and looks flat.
+
+Two smaller ones with the same character. The palette is a **baked LUT** of 512
+entries, not a cosine evaluated per sample: three `cos` calls per sample is
+~0.5ms at 20,000 samples, which would make the palette *four times* the cost of
+the kernel at the home view and the cheapest motion mode the most expensive
+thing in the frame. And the cycling **phase must be wrapped** every frame
+(`% period`), or after long uptime the increment goes small relative to the
+accumulated value, cycling stutters and then stalls — a failure that only
+appears after a day of the unattended mode running.
+
+Four more, about structure rather than maths.
+
+**Split `App::update(&mut self)` from a pure `App::draw(&self)`.** Sampling and
+blitting go in `update`; `draw` only puts the finished grid into the frame. If
+the cost moves into `draw` it needs `&mut self`, the snapshot helper changes
+signature, and — the real loss — sample time, blit time and ratatui's buffer
+diff collapse into one unmeasurable call. Getting the area before `update`
+needs `terminal.autoresize()` then `terminal.get_frame().area()`, **not**
+`Terminal::size()`, whose own docs say it reports the backend size without
+updating ratatui's viewport bookkeeping — so it disagrees with `Frame::area()`
+for one frame after a resize.
+
+**`Cell` grows a `background` field, not a variant.** An enum would branch per
+cell inside `Widget::render` and cost `Grid` its uniform `Copy` layout. Nothing
+breaks, because every construction already goes through `Cell::new` or
+`Cell::default` — there are no struct literals outside the module. One
+consequence to make a decision rather than discover: covered cells then carry an
+explicit black instead of leaving `Color::Reset`, so frascii paints over a
+user's terminal theme. Right for a fractal, but say so in the code.
+
+**The clock accumulates; it is not `now - start`.** Subtracting from a start
+instant jumps the animation forward by however long the user was paused. And
+**zoom is geometric in `dt`** — `factor.powf(dt.as_secs_f64())`, never
+`factor * dt` — which is what makes a dive advance at the same plane-speed on a
+slow machine, in fewer chunkier frames, rather than simply going slower. That
+matters directly for the unattended mode.
+
+**Half-block needs only `▀`.** `▄` with the colours swapped is pixel-identical,
+so one glyph keeps the blit branchless and every cell single-width. Half-block
+ignores the glyph ramp entirely — it is a 2× vertical pixel display, not ASCII
+art, which is precisely why glyph mode is the default: that is the product's
+identity, and half-block is the escape hatch for detail.
+
+Two smaller notes for when the splash goes: **rename the snapshot tests and
+`git mv` the `.snap` files together**, because insta derives filenames from test
+names and a rename otherwise reads as a delete plus an add — exactly the shape
+this file warns against under [Render snapshots](#render-snapshots). Keep all
+three sizes; the tiny ones caught the border-overpaint bug and are worth more
+against a fractal than a splash, since a symbols-only capture pins the glyph
+ramp and the plane↔sample geometry, the two things most likely to shift
+silently. And the palettes built from terminal themes must interpolate in
+**Oklab or linear-light**, not sRGB — syntax themes put near-complementary
+colours adjacent, and their sRGB midpoint is grey mud — with the loop closed
+end-to-end, or cycling rotates a visible seam across the screen. Define them as
+named colour lists plus an interpolation space; a hand-written 512-entry table
+cannot be reviewed and a seam in one is invisible in a diff.
 
 ### Already designed
 
-`frascii-core` now holds the kernels (`Fractal`, `Mandelbrot`, `Julia`), the plane↔sample mapping (`Viewport`, with `pixel_aspect` as the frontend's only geometric input), the sampler (`Sampler`/`CpuSampler`, rayon across rows), and the search for somewhere worth zooming (`boundary_target`, `interior_fraction`). The headless benchmark landed in `crates/frascii/src/headless.rs` — in the *binary*, because writing a file is host-bound I/O that core forbids, and because a second consumer of core that links no frontend is compile-time proof the boundary holds.
+`frascii-core` now holds the kernels (`Fractal`, `Mandelbrot`, `Julia`), the plane↔sample mapping (`Viewport`, with `sample_aspect` as the frontend's only geometric input), the sampler (`sample_into`, rayon across rows), and the search for somewhere worth zooming (`boundary_target`, `interior_fraction`).
+
+`sample_into` is a free function, and was briefly a `Sampler` trait with a `CpuSampler` impl "so a GPU backend could slot in later". **Do not re-add that trait on instinct.** The justification does not survive: a GPU backend is upload → dispatch → readback, with asynchronous completion and a buffer the host does not own in between, and that signature fits none of it — so the seam was shaped wrongly for the only thing it was a seam for, and would have been rewritten when the backend arrived. What actually keeps a second backend possible is that `Viewport`, `Escape` and `SampleGrid` are backend-neutral data naming no host; adding a trait then is a mechanical refactor of one function. Meanwhile the trait costs dynamic dispatch, or a generic parameter that goes viral through every type holding the frontend's `App`. The headless benchmark landed in `crates/frascii/src/headless.rs` — in the *binary*, because writing a file is host-bound I/O that core forbids.
+
+**It is not compile-time proof of the boundary, and an earlier version of this file claimed it was.** Cargo dependencies are per-*package*, and that package depends on `frascii-tui`, so `frascii_tui` is in scope for `headless.rs` and the compiler would accept an import of it. The rule is enforced by a source scan (`the_headless_path_never_reaches_for_the_frontend`), which is the same grade of evidence the render boundary relies on — no more. Genuine compile-time proof is available if it is ever worth having: an example under `frascii-core` sees only that package's dependencies and so literally cannot name the frontend, at the cost of moving the feature out of the CLI. What *is* compile-time enforced is the other direction: core's manifest has no frontend dependency, so core cannot reach upward.
+
+A tension to expect: a headless exporter that wants the *real* palette needs `frascii-tui`, at which point it stops being an independent consumer of core and becomes a second driver of the frontend. That is a reasonable thing to want, but it cannot carry the boundary claim — so keep the timing path greyscale and core-only, and mark any colour path as having given the claim up.
 
 ## Coding conventions
 
@@ -143,6 +289,13 @@ Measured with `frascii --headless` on a Ryzen 9 7940HS (release, 20,000 samples/
 | 1e10 magnification | 4,286 | 6.59ms | 152 |
 
 So the 30fps budget is met with roughly 5× headroom in the worst case, on the CPU, with no SIMD and no GPU. That answers the question the staging was ordered to answer first, and it is why the `Sampler` trait has exactly one implementation.
+
+**If that headroom is ever spent, the order is not the obvious one.** Two corrections worth keeping, both from review:
+
+- **AVX-512 buys far less than its name suggests here.** The ~575 GFLOP/s figure above already assumes 256-bit AVX2 FMA (8 cores × 4.5 GHz × 2 units × 4 lanes × 2 flops = 576); Zen 4 executes 512-bit instructions on 256-bit datapaths over two cycles, so the wider ISA is not double the throughput. More importantly the escape loop is **latency-bound**, roughly ten cycles per iteration, so it reaches about 5% of peak. Vectorising helps by giving several *independent* dependency chains, not by widening arithmetic — budget 2–2.5× after lane divergence, and note SMT already harvests some of that. `unsafe_code` is forbidden workspace-wide, so a hand-written intrinsic path is off the table regardless; a safe crate such as `wide` would be the route.
+- **Periodicity checking outranks SIMD** for the workload that actually matters. At depth the cost is interior points, and the cardioid test covers only the *main* cardioid, not the mini-brot being descended into — where the shortcut catches exactly nothing. Periodicity is plausibly 2–3× on that case. It carries a real risk (too loose an epsilon paints exterior as interior, which looks exactly like a kernel bug), so it needs a false-positive property test before it is trusted.
+
+And one distinction to keep straight: **progressive refinement and dynamic resolution scaling are different tools.** Refinement — draw coarse, sharpen while idle — improves latency after a keypress. Auto-zoom has no idle frames to refine into, so it does nothing there; the tool for a sustained budget miss is dropping sample density.
 
 **A benchmark must report what it rendered.** The first version of `--headless` zoomed straight in on the home centre, which sits *inside* the set, and produced a 100%-interior frame that the cardioid shortcut answers instantly — it claimed 16,198 fps where the real figure at that depth is 190. It now dives via `boundary_target` and prints the interior fraction, warning when a frame is not representative. Any future backend comparison has to keep that, or it will measure the shortcut and call it a speedup.
 

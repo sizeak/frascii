@@ -1,11 +1,22 @@
 //! Rendering without a terminal: the benchmark, and the boundary's proof.
 //!
 //! This module imports **`frascii_core` and never `frascii_tui`**, which is the
-//! point of it existing here rather than inside the frontend. A second consumer
-//! of core that links no frontend is compile-time evidence that the layering
-//! holds — stronger than any comment claiming it does — and
-//! `the_headless_path_never_reaches_for_the_frontend` below asserts it stays
-//! that way.
+//! point of it existing here rather than inside the frontend: it is a second
+//! consumer of core that needs no frontend at all.
+//!
+//! That is *not* compile-time proof, and calling it so would be exactly the
+//! receipt-less boundary claim this repo's conventions warn about. Cargo
+//! dependencies are per-**package**, and this package depends on
+//! `frascii-tui`, so `frascii_tui` is in scope here and the compiler would
+//! happily accept an import of it. The only thing enforcing the rule is
+//! `the_headless_path_never_reaches_for_the_frontend` below — a source scan, the
+//! same grade of evidence `this_module_stays_free_of_ratatui` provides for the
+//! render boundary. (Genuine compile-time proof is available if ever wanted: an
+//! example under `frascii-core` sees only that package's dependencies and so
+//! *cannot* name the frontend. It would mean moving the feature out of the CLI.)
+//!
+//! What *is* compile-time enforced is the other direction — core's manifest has
+//! no frontend dependency, so core cannot reach upward.
 //!
 //! It is also the only thing in the repo that can answer "is this fast enough?"
 //! with a number.
@@ -17,8 +28,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use frascii_core::{
-    CpuSampler, Escape, Fractal, Julia, Mandelbrot, SampleGrid, Sampler, Viewport, boundary_target,
-    interior_fraction,
+    Escape, Fractal, Julia, Mandelbrot, SampleGrid, Viewport, boundary_target, interior_fraction,
+    sample_into,
 };
 
 /// Which fractal a headless run should render.
@@ -69,6 +80,9 @@ pub(crate) struct Report {
     pub(crate) limit: u32,
     /// Samples per frame.
     pub(crate) samples: usize,
+    /// The magnification actually reached, which is not the one requested when
+    /// `f64` ran out first.
+    pub(crate) magnification: f64,
     /// The fraction of the measured frame that was interior.
     ///
     /// Reported because a benchmark that cannot tell you it measured a blank
@@ -108,8 +122,8 @@ impl Report {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "{} samples/frame, limit {}, backend {}",
-            self.samples, self.limit, backend
+            "{} samples/frame, limit {}, magnification {:.3e}, backend {}",
+            self.samples, self.limit, self.magnification, backend
         );
         let _ = writeln!(
             out,
@@ -161,7 +175,7 @@ pub(crate) fn run(options: &Options) -> std::io::Result<Report> {
 
     for _ in 0..options.frames {
         let started = Instant::now();
-        CpuSampler.sample_into(&mut grid, &viewport, fractal.as_ref(), limit);
+        sample_into(&mut grid, &viewport, fractal.as_ref(), limit);
         timings.push(started.elapsed());
     }
 
@@ -174,6 +188,7 @@ pub(crate) fn run(options: &Options) -> std::io::Result<Report> {
         limit,
         samples: options.cols * options.rows,
         interior: interior_fraction(&grid),
+        magnification: viewport.magnification(),
     })
 }
 
@@ -190,29 +205,39 @@ fn dive_to(viewport: &mut Viewport, grid: &mut SampleGrid, fractal: &dyn Fractal
     const STEP: f64 = 8.0;
 
     while viewport.magnification() < target {
-        CpuSampler.sample_into(grid, viewport, fractal, viewport.suggested_limit());
+        sample_into(grid, viewport, fractal, viewport.suggested_limit());
         let Some(point) = boundary_target(grid, viewport) else {
             // Nowhere left to go; stop here rather than dive into a flat field.
             break;
         };
         viewport.centre = point;
         let remaining = target / viewport.magnification();
-        viewport.zoom_centre(1.0 / remaining.min(STEP));
+        if viewport.zoom_centre(1.0 / remaining.min(STEP)) {
+            // The viewport refused to go narrower because `f64` cannot resolve
+            // it. Without this the loop spins forever: the clamp holds
+            // `half_width` fixed, so the magnification never reaches the
+            // target. Any unattended zoom needs the same guard.
+            break;
+        }
     }
 
     // Leave the grid holding the view that will actually be measured.
-    CpuSampler.sample_into(grid, viewport, fractal, viewport.suggested_limit());
+    sample_into(grid, viewport, fractal, viewport.suggested_limit());
 }
 
-/// Write the grid as a binary PPM.
+/// Write the grid as a binary greyscale PGM.
 ///
 /// Greyscale by escape time, deliberately plain: this is an image to *check the
 /// geometry with*, not a rendering. Palettes and glyph ramps are the frontend's
-/// business, and duplicating them here would be the start of a second renderer
-/// that drifts from the real one.
+/// business, and reaching for them here would make this a second driver of the
+/// first renderer rather than an independent consumer of core — which is the
+/// thing it exists to be.
+///
+/// `P5` (one byte per sample), not `P6`: the data is greyscale, so writing three
+/// identical bytes per sample would be two thirds waste.
 fn write_ppm(path: &Path, grid: &SampleGrid) -> std::io::Result<()> {
     let mut file = BufWriter::new(File::create(path)?);
-    writeln!(file, "P6\n{} {}\n255", grid.cols(), grid.rows())?;
+    writeln!(file, "P5\n{} {}\n255", grid.cols(), grid.rows())?;
 
     // Scale against the brightest escape actually present, so the image uses
     // its full range at any iteration limit.
@@ -230,7 +255,7 @@ fn write_ppm(path: &Path, grid: &SampleGrid) -> std::io::Result<()> {
                 }
                 _ => 0,
             };
-            file.write_all(&[value, value, value])?;
+            file.write_all(&[value])?;
         }
     }
     file.flush()
@@ -308,6 +333,7 @@ mod tests {
             limit: 500,
             samples: 800,
             interior: 0.25,
+            magnification: 1.0,
         };
         assert!(fast.summary("cpu").contains("meets 30fps"));
 
@@ -316,6 +342,7 @@ mod tests {
             limit: 500,
             samples: 800,
             interior: 0.25,
+            magnification: 1.0,
         };
         assert!(slow.summary("cpu").contains("BELOW 30fps"));
     }
@@ -331,6 +358,7 @@ mod tests {
             limit: 100,
             samples: 1,
             interior: 0.25,
+            magnification: 1.0,
         };
         assert_eq!(report.mean(), Duration::from_millis(20));
         assert_eq!(report.worst(), Duration::from_millis(30));
@@ -347,12 +375,30 @@ mod tests {
         o.ppm = Some(path.clone());
         run(&o).expect("writes a ppm");
 
-        let bytes = std::fs::read(&path).expect("ppm exists");
-        assert!(bytes.starts_with(b"P6\n40 20\n255\n"), "bad header");
-        // Header plus three bytes per sample.
-        assert_eq!(bytes.len(), b"P6\n40 20\n255\n".len() + 40 * 20 * 3);
+        let bytes = std::fs::read(&path).expect("pgm exists");
+        assert!(bytes.starts_with(b"P5\n40 20\n255\n"), "bad header");
+        // Header plus one byte per sample — greyscale, so no triplets.
+        assert_eq!(bytes.len(), b"P5\n40 20\n255\n".len() + 40 * 20);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unreachable_magnification_stops_at_the_wall_instead_of_hanging() {
+        // The clamp holds `half_width` fixed once `f64` is exhausted, so a dive
+        // loop that waits for the magnification to reach its target never
+        // terminates. This asks for far more than is representable and must
+        // still return.
+        let mut o = options();
+        o.magnification = 1e20;
+        o.frames = 1;
+        let report = run(&o).expect("no I/O");
+        assert!(report.magnification > 1.0, "it should have dived at all");
+        assert!(
+            report.magnification < 1e20,
+            "it cannot have reached {:.3e}",
+            report.magnification
+        );
     }
 
     #[test]

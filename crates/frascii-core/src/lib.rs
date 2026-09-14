@@ -6,11 +6,13 @@
 //! cell is, or on where an answer is drawn.
 //!
 //! ```
-//! use frascii_core::{CpuSampler, Mandelbrot, SampleGrid, Sampler, Viewport};
+//! use frascii_core::{Mandelbrot, SampleGrid, Viewport, sample_into};
 //!
-//! let viewport = Viewport::home(80, 40, 0.5);
+//! // 80x40 samples, one per terminal cell, so a sample is twice as tall as
+//! // it is wide: sample_aspect 2.0.
+//! let viewport = Viewport::home(80, 40, 2.0);
 //! let mut grid = SampleGrid::new(0, 0);
-//! CpuSampler.sample_into(&mut grid, &viewport, &Mandelbrot, 500);
+//! sample_into(&mut grid, &viewport, &Mandelbrot, 500);
 //!
 //! assert_eq!((grid.cols(), grid.rows()), (80, 40));
 //! ```
@@ -26,7 +28,7 @@
 //! What belongs here is anything a second frontend would need *unchanged*: the
 //! kernels, the plane↔sample mapping, the sampler, and the search for somewhere
 //! worth zooming. An image exporter needs all of those exactly as a terminal
-//! does — what differs between them is a *number*, [`Viewport::pixel_aspect`],
+//! does — what differs between them is a *number*, [`Viewport::sample_aspect`],
 //! which the frontend supplies.
 //!
 //! Note the two senses of "grid", because conflating them is what would pull
@@ -46,7 +48,7 @@ pub use complex::Complex;
 pub use escape::{BAILOUT, escape_time};
 pub use fractal::{Fractal, Julia, Mandelbrot};
 pub use sample::SampleGrid;
-pub use sampler::{CpuSampler, Sampler};
+pub use sampler::sample_into;
 pub use target::{boundary_target, interior_fraction, is_interesting};
 pub use viewport::{HOME_CENTRE, HOME_HALF_WIDTH, Precision, Viewport};
 
@@ -68,8 +70,16 @@ pub enum Escape {
     Escaped {
         /// Iterations completed before the orbit escaped.
         iterations: u32,
-        /// Continuous iteration count, in the range `iterations ..
-        /// iterations + 1`.
+        /// Continuous iteration count, in `iterations - 1` (exclusive) to
+        /// `iterations` (inclusive).
+        ///
+        /// Note the direction: it is *at most* `iterations`, never more. The
+        /// orbit overshoots the bailout radius on the step that trips the test,
+        /// and the correction term subtracts that overshoot. An earlier version
+        /// of this comment claimed `iterations .. iterations + 1`, which was
+        /// wrong for every escaping point — a whole band out, which would have
+        /// shown up as a palette being off by one rather than as anything
+        /// resembling a kernel bug.
         ///
         /// Renderers should prefer this over `iterations`: mapping the integer
         /// count straight onto a palette produces the banded look that

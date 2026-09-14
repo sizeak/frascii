@@ -98,11 +98,11 @@ fn touches_interior(grid: &SampleGrid, ix: usize, iy: usize) -> bool {
 mod tests {
     use super::*;
     use crate::fractal::{Fractal, Mandelbrot};
-    use crate::sampler::{CpuSampler, Sampler};
+    use crate::sampler::sample_into;
 
     fn sampled(vp: &Viewport, limit: u32) -> SampleGrid {
         let mut grid = SampleGrid::new(0, 0);
-        CpuSampler.sample_into(&mut grid, vp, &Mandelbrot, limit);
+        sample_into(&mut grid, vp, &Mandelbrot, limit);
         grid
     }
 
@@ -161,6 +161,83 @@ mod tests {
                 assert!(iterations > 20, "target escaped in only {iterations}");
             }
             Escape::Interior => {}
+        }
+    }
+
+    #[test]
+    fn a_full_dive_to_the_precision_wall_never_collapses() {
+        // The previous version of this test stopped at 1e5 — about a third of
+        // the log-depth a real dive covers, and the shallow third at that. The
+        // deep regime is where the boundary degenerates into a filament and a
+        // target's neighbourhood can resolve away under the next
+        // magnification, so it is the only part worth testing.
+        //
+        // Both ends are thresholded. Near zero means the dive fell into empty
+        // exterior; near one means it fell inside a bulb and the frame is solid
+        // — equally broken, and the adjacency rule does not exclude it on its
+        // own, because a bulb's rim satisfies "escaped sample touching an
+        // interior sample" perfectly.
+        let mut vp = Viewport::home(50, 25, 2.0);
+        let mut steps = 0;
+        let mut worst_low = 1.0_f64;
+        let mut worst_high = 0.0_f64;
+
+        loop {
+            let grid = sampled(&vp, vp.suggested_limit());
+            let fraction = interior_fraction(&grid);
+            worst_low = worst_low.min(fraction);
+            worst_high = worst_high.max(fraction);
+            assert!(
+                (MIN_INTERESTING..=MAX_INTERESTING).contains(&fraction),
+                "step {steps} at {:.3e}x collapsed to {fraction:.4} interior",
+                vp.magnification()
+            );
+
+            let Some(point) = boundary_target(&grid, &vp) else {
+                panic!(
+                    "step {steps} at {:.3e}x found no target",
+                    vp.magnification()
+                );
+            };
+            vp.centre = point;
+            steps += 1;
+
+            // Stop where the renderer would: `f64` exhausted.
+            if vp.zoom_centre(0.125) {
+                break;
+            }
+            assert!(steps < 64, "dive did not terminate");
+        }
+
+        // It must actually have gone deep, or the test proves nothing.
+        assert!(
+            vp.magnification() > 1e10,
+            "only reached {:.3e}x in {steps} steps",
+            vp.magnification()
+        );
+        assert!(steps >= 10, "only {steps} steps to the wall");
+        // Recorded so a regression shows as a changed margin, not just a pass.
+        assert!(
+            worst_low > MIN_INTERESTING,
+            "closest to empty: {worst_low:.4}"
+        );
+        assert!(
+            worst_high < MAX_INTERESTING,
+            "closest to solid: {worst_high:.4}"
+        );
+    }
+
+    #[test]
+    fn the_target_choice_is_deterministic() {
+        // Ties at the highest iteration count are routine at depth. The scan
+        // keeps the first maximum in row-major order (the comparison is strictly
+        // greater), which makes dives reproducible — without that, the hang
+        // fixed in the dive loop could not have had a regression test.
+        let vp = Viewport::home(40, 20, 2.0);
+        let grid = sampled(&vp, 400);
+        let first = boundary_target(&grid, &vp);
+        for _ in 0..5 {
+            assert_eq!(boundary_target(&grid, &vp), first);
         }
     }
 

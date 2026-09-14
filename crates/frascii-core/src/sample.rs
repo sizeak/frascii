@@ -56,6 +56,22 @@ impl SampleGrid {
         (ix < self.cols && iy < self.rows).then(|| self.samples[iy * self.cols + ix])
     }
 
+    /// Overwrite the sample at `(ix, iy)`.
+    ///
+    /// Out-of-bounds writes are dropped rather than panicking, matching the
+    /// rest of the grid's edge behaviour.
+    ///
+    /// The sampler does not use this — it fills rows in parallel through
+    /// `rows_mut`. It exists so a *consumer* can build a grid by hand: every
+    /// glyph ramp, palette and sub-cell reduction in a frontend is a function of
+    /// a `SampleGrid`, and being able to write a 4×4 one in a test is what lets
+    /// those be checked without running a kernel.
+    pub fn set(&mut self, ix: usize, iy: usize, sample: Escape) {
+        if ix < self.cols && iy < self.rows {
+            self.samples[iy * self.cols + ix] = sample;
+        }
+    }
+
     /// One row of samples, or `None` when `iy` is past the last row.
     #[must_use]
     pub fn row(&self, iy: usize) -> Option<&[Escape]> {
@@ -117,6 +133,32 @@ mod tests {
         let g = SampleGrid::new(0, 40);
         assert_eq!(g.samples().count(), 0);
         assert!(g.get(0, 0).is_none());
+    }
+
+    #[test]
+    fn set_and_get_round_trip_within_bounds() {
+        let mut g = SampleGrid::new(3, 2);
+        let sample = Escape::Escaped {
+            iterations: 7,
+            smooth: 6.5,
+        };
+        g.set(2, 1, sample);
+        assert_eq!(g.get(2, 1), Some(sample));
+        assert_eq!(g.get(0, 0), Some(Escape::Interior));
+    }
+
+    #[test]
+    fn out_of_bounds_writes_are_dropped() {
+        let mut g = SampleGrid::new(2, 2);
+        g.set(
+            9,
+            9,
+            Escape::Escaped {
+                iterations: 1,
+                smooth: 0.5,
+            },
+        );
+        assert!(g.samples().all(Escape::is_interior));
     }
 
     #[test]

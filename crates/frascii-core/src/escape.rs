@@ -124,15 +124,19 @@ mod tests {
 
     #[test]
     fn the_smooth_count_sits_inside_its_own_escape_band() {
-        // The invariant that makes it useful for interpolation: it refines the
-        // integer count rather than replacing it.
-        for i in 0..40 {
-            let re = 0.25 + 0.004 * f64::from(i);
-            if let Escape::Escaped { iterations, smooth } = mandel(re, 0.0, 5_000) {
+        // Exactly `(n-1, n]`, not a loose window. The previous version of this
+        // test allowed ±1 and so accepted a doc comment that was a full band
+        // out; a tight assertion is the only kind that can catch that.
+        for i in 0..200 {
+            let re = -2.4 + 0.017 * f64::from(i);
+            if let Escape::Escaped { iterations, smooth } = mandel(re, 0.13, 5_000) {
+                if iterations == 0 {
+                    continue; // clamped to zero; no band to be inside of
+                }
                 let n = f64::from(iterations);
                 assert!(
-                    (n - 1.0..=n + 1.0).contains(&smooth),
-                    "n={iterations} smooth={smooth} for c={re}"
+                    smooth > n - 1.0 && smooth <= n,
+                    "smooth {smooth} outside (n-1, n] for n={iterations}, c={re}+0.13i"
                 );
             }
         }

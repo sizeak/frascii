@@ -2,7 +2,24 @@
 
 A terminal ASCII-art renderer for realtime fractals — a live, colourful ASCII rendering of escape-time fractals drawn straight into your terminal.
 
-> **Status: bootstrap.** The workspace, the task runner and the crate boundaries are in place. The fractal kernels and the rendering pipeline are not implemented yet: `frascii` currently opens a terminal, draws a splash frame, and quits on `q`. What is deliberately deferred is listed in [CLAUDE.md](CLAUDE.md#not-yet-designed).
+> **Status: it renders.** The Mandelbrot set draws live in glyph mode with nine truecolour palettes. Not yet interactive — pan, zoom, Julia sets, half-block mode and the motion modes are next; see [CLAUDE.md](CLAUDE.md#not-yet-designed).
+
+```
+:::::::::::::::::::::::::::::::::::::::::::::-------------------===+-----------:::::::::::::::::
+::::::::::::::::::::::::::::::::::::::----------------------===+  +=+=-------------:::::::::::::
+::::::::::::::::::::::::::::::-----------------------==--=====+     =====-----=-------::::::::::
+:::::::::::::::::::::::::--------------------------==+                    +  *=--------:::::::::
+::::::::::::::::::::-------------==-------------===*                         #===-------::::::::
+::::::::::::::::------------------==+ +@+#*%*===+                              ==--------:::::::
+:::::::::::---------=------====                                              +-----------:::::::
+::::::::::::::::------------------==+ +@+#*%*===+                              ==--------:::::::
+::::::::::::::::::::-------------==-------------===*                         #===-------::::::::
+:::::::::::::::::::::::--------------------------==+                    +  *=--------:::::::::::
+::::::::::::::::::::::::::::::-----------------------==--=====+     =====-----=-------::::::::::
+::::::::::::::::::::::::::::::::::::::----------------------===+  +=+=-------------:::::::::::::
+```
+
+(Glyphs only — every cell also carries a 24-bit colour.)
 
 ## Build and run
 
@@ -56,9 +73,9 @@ meets 30fps
 frame was 11.1% interior
 ```
 
-It exists for two reasons beyond benchmarking. It reports the **interior fraction** because a run that renders a solid black frame can look 85× faster than real work — the cardioid shortcut answers an all-interior view instantly — so the number is printed and flagged when the view is not representative. And it consumes `frascii-core` while linking no frontend at all, which makes the crate boundary something the build checks rather than something the docs claim.
+It exists for two reasons beyond benchmarking. It reports the **interior fraction** because a run that renders a solid black frame can look 85× faster than real work — the cardioid shortcut answers an all-interior view instantly — so the number is printed and flagged when the view is not representative. And it consumes `frascii-core` without touching the frontend at all, which keeps core honest about being usable on its own. (A source-scan test enforces that, not the compiler: cargo dependencies are per-package, so the frontend is technically in scope there.)
 
-`--ppm` writes the last frame as a plain greyscale image, for checking geometry.
+`--ppm` writes the last frame as a binary greyscale PGM, for checking geometry.
 
 `--log` takes a file rather than a stream because the TUI owns the alternate screen: a log line on stdout or stderr is painted over the render. Tail it from a second terminal:
 
@@ -74,7 +91,7 @@ tail -f target/frascii.log      # ... in another terminal
 | `q` / `Esc` | Quit |
 | `Ctrl+C` | Quit |
 
-Pan, zoom, fractal selection and animation controls are not implemented yet.
+Pan, zoom, fractal selection, palette switching and the animation controls are not implemented yet.
 
 ## How it fits together
 

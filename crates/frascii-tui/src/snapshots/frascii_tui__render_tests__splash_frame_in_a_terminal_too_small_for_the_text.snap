@@ -1,7 +1,0 @@
----
-source: crates/frascii-tui/src/render_tests.rs
-expression: "frame(&App::new(), 8, 3)"
----
-"┌scii ─┐"
-"│frasci│"
-"└──────┘"

@@ -10,14 +10,29 @@
 //! changed. If a change invalidates a snapshot, re-point it at the new UI —
 //! never delete the file, because a deleted snapshot leaves nothing to notice
 //! when the UI comes back.
+//!
+//! Against a fractal these earn more than they did against the splash: a
+//! symbols-only capture pins exactly the glyph ramp and the plane↔sample
+//! geometry, which are the two things most likely to shift silently. The tiny
+//! sizes are kept for the same reason they were added — they are what caught
+//! the border-overpaint bug.
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::layout::Rect;
 
 use crate::App;
 
-/// Draw one frame of `app` at the given size and snapshot it.
-fn frame(app: &App, width: u16, height: u16) -> String {
+/// Draw one frame at the given size and snapshot it.
+///
+/// `update` then `draw`, in that order, because that is the split the app is
+/// built around and a snapshot of `draw` alone would capture an empty grid.
+/// Nothing here consults a clock, so these are deterministic — which is the
+/// property that makes them worth having.
+fn frame(width: u16, height: u16) -> String {
+    let mut app = App::new();
+    app.update(Rect::new(0, 0, width, height));
+
     let mut terminal = Terminal::new(TestBackend::new(width, height))
         .expect("TestBackend cannot fail to initialise");
     terminal
@@ -27,16 +42,16 @@ fn frame(app: &App, width: u16, height: u16) -> String {
 }
 
 #[test]
-fn splash_frame() {
-    insta::assert_snapshot!(frame(&App::new(), 60, 12));
+fn mandelbrot_home_view() {
+    insta::assert_snapshot!(frame(60, 12));
 }
 
 #[test]
-fn splash_frame_in_a_narrow_terminal() {
-    insta::assert_snapshot!(frame(&App::new(), 20, 6));
+fn mandelbrot_home_view_in_a_narrow_terminal() {
+    insta::assert_snapshot!(frame(20, 6));
 }
 
 #[test]
-fn splash_frame_in_a_terminal_too_small_for_the_text() {
-    insta::assert_snapshot!(frame(&App::new(), 8, 3));
+fn mandelbrot_home_view_in_a_tiny_terminal() {
+    insta::assert_snapshot!(frame(8, 3));
 }

@@ -24,7 +24,11 @@
 
 mod app;
 mod error;
+mod oklab;
+mod palette;
+mod ramp;
 mod render;
+mod shade;
 mod widget;
 
 #[cfg(test)]
@@ -32,7 +36,10 @@ mod render_tests;
 
 pub use app::{App, Flow};
 pub use error::{Result, TuiError};
-pub use render::{Cell, Grid, Rgb, placeholder_cell};
+pub use palette::Palette;
+pub use ramp::RAMP;
+pub use render::{Cell, Grid, Rgb};
+pub use shade::{CellMode, Shader, shade_into};
 
 /// Run the frontend: set the terminal up, drive the loop, and restore it.
 ///
