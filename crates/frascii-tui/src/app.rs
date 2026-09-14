@@ -2,12 +2,13 @@
 
 use std::time::{Duration, Instant};
 
-use frascii_core::{Mandelbrot, SampleGrid, Viewport, sample_into};
+use frascii_core::{Kernel, SampleGrid, Viewport};
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
 
 use crate::error::Result;
+use crate::palette::Palette;
 use crate::render::Grid;
 use crate::shade::{CellMode, Shader, shade_into};
 
@@ -61,15 +62,33 @@ pub enum Flow {
 /// question: if it changes, must the kernel run again? If yes it belongs here;
 /// if no, on the shader.
 ///
-/// The fractal is not a field yet because there is only one. When switching
-/// arrives it joins this struct as an **enum** — `&dyn Fractal` is neither
-/// `Copy` nor `PartialEq`, so a trait object here would quietly break the
-/// comparison this type exists for.
+/// The kernel is an **enum**, not a `Box<dyn Fractal>`: a trait object is
+/// neither `Copy` nor `PartialEq`, so it would quietly break the comparison
+/// this type exists for.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct SampleParams {
     viewport: Viewport,
+    kernel: Kernel,
     limit: u32,
 }
+
+/// How far one pan press moves the view, as a fraction of its width.
+///
+/// A fraction rather than a fixed number of samples, so panning feels the same
+/// at every zoom depth — the alternative crawls when zoomed in and leaps when
+/// zoomed out.
+const PAN_FRACTION: f64 = 1.0 / 12.0;
+
+/// How much one zoom press scales the view.
+const ZOOM_STEP: f64 = 0.8;
+
+/// The furthest the iteration limit can be biased from the viewport's
+/// suggestion, in doublings either way.
+///
+/// Bounded because the suggestion already tracks depth: the bias is for
+/// *taste* — trading detail against frame time — not for reaching depths the
+/// automatic value cannot. Unbounded, it would be a way to hang the renderer.
+const LIMIT_BIAS_RANGE: i32 = 4;
 
 /// The frontend's state.
 #[derive(Debug)]
@@ -80,6 +99,10 @@ pub struct App {
     samples: SampleGrid,
     shader: Shader,
     cells: Grid,
+    /// Which palette, as an index so `p` can cycle.
+    palette_index: usize,
+    /// Iteration limit bias, in doublings from the viewport's suggestion.
+    limit_bias: i32,
 }
 
 impl App {
@@ -93,6 +116,7 @@ impl App {
                 // size. Sampling a zero grid is legal and costs nothing, so
                 // there is no special first-frame path to get wrong.
                 viewport: Viewport::home(0, 0, mode.sample_aspect(CELL_ASPECT)),
+                kernel: Kernel::default(),
                 limit: 0,
             },
             sampled_for: None,
@@ -102,6 +126,8 @@ impl App {
                 ..Shader::default()
             },
             cells: Grid::new(0, 0),
+            palette_index: 0,
+            limit_bias: 0,
         }
     }
 
@@ -109,6 +135,18 @@ impl App {
     #[must_use]
     pub fn palette_name(&self) -> &'static str {
         self.shader.palette.name()
+    }
+
+    /// The fractal currently in use, for a status line.
+    #[must_use]
+    pub const fn kernel_name(&self) -> &'static str {
+        self.params.kernel.name()
+    }
+
+    /// How far the view is zoomed, relative to the home view.
+    #[must_use]
+    pub fn magnification(&self) -> f64 {
+        self.params.viewport.magnification()
     }
 
     /// Decide what a key press means.
@@ -139,10 +177,98 @@ impl App {
         }
 
         match (key.code, key.modifiers) {
-            (KeyCode::Char('c' | 'C'), KeyModifiers::CONTROL) => Flow::Quit,
-            (KeyCode::Char('q' | 'Q') | KeyCode::Esc, _) => Flow::Quit,
-            _ => Flow::Continue,
+            (KeyCode::Char('c' | 'C'), KeyModifiers::CONTROL) => return Flow::Quit,
+            (KeyCode::Char('q' | 'Q') | KeyCode::Esc, _) => return Flow::Quit,
+
+            // Panning. `Flow` stays `Continue` for all of these: a command must
+            // not travel through the return value, or `run` would have to
+            // re-interpret a decision made here and this would stop being the
+            // one place a binding is defined.
+            (KeyCode::Char('h') | KeyCode::Left, _) => self.pan(-1, 0),
+            (KeyCode::Char('l') | KeyCode::Right, _) => self.pan(1, 0),
+            (KeyCode::Char('k') | KeyCode::Up, _) => self.pan(0, -1),
+            (KeyCode::Char('j') | KeyCode::Down, _) => self.pan(0, 1),
+
+            // Zoom. `=` because it is the unshifted `+` on most layouts, so
+            // zooming in does not need a modifier.
+            (KeyCode::Char('+' | '='), _) => self.zoom(ZOOM_STEP),
+            (KeyCode::Char('-' | '_'), _) => self.zoom(1.0 / ZOOM_STEP),
+
+            // Iteration limit, biased against the viewport's suggestion.
+            (KeyCode::Char('.' | '>'), _) => self.bias_limit(1),
+            (KeyCode::Char(',' | '<'), _) => self.bias_limit(-1),
+
+            (KeyCode::Char('r' | 'R'), _) => self.reset(),
+            (KeyCode::Tab | KeyCode::Char('f'), _) => self.next_kernel(),
+            (KeyCode::Char('p' | 'P'), _) => self.next_palette(),
+
+            _ => {}
         }
+        Flow::Continue
+    }
+
+    /// Shift the view by one step, in units of `(dx, dy)` presses.
+    fn pan(&mut self, dx: isize, dy: isize) {
+        let step = self.pan_step();
+        self.params.viewport.pan_samples(dx * step, dy * step);
+    }
+
+    /// One pan press, in samples.
+    ///
+    /// At least one sample, so panning still works in a terminal narrow enough
+    /// that the fraction rounds to zero.
+    fn pan_step(&self) -> isize {
+        let cols = self.params.viewport.cols as f64;
+        ((cols * PAN_FRACTION).round() as isize).max(1)
+    }
+
+    /// Scale the view about its centre.
+    ///
+    /// Zoom is about the centre rather than a cursor because there is no cursor
+    /// yet: mouse capture has to be enabled explicitly *and* disabled in both
+    /// the teardown and the panic hook, which is its own piece of work.
+    fn zoom(&mut self, factor: f64) {
+        if self.params.viewport.zoom_centre(factor) {
+            // Clamped at the precision wall. Nothing to report yet — a status
+            // line is the next increment — but the viewport refused rather
+            // than dissolving into rounding error, which is the point.
+            tracing::debug!(
+                magnification = self.params.viewport.magnification(),
+                "zoom clamped: f64 precision exhausted"
+            );
+        }
+    }
+
+    /// Move the iteration limit away from the viewport's suggestion.
+    fn bias_limit(&mut self, delta: i32) {
+        self.limit_bias = (self.limit_bias + delta).clamp(-LIMIT_BIAS_RANGE, LIMIT_BIAS_RANGE);
+    }
+
+    /// Back to the home view, keeping the terminal's size.
+    ///
+    /// The palette and fractal are deliberately left alone: `r` means "I have
+    /// zoomed somewhere useless, take me back", not "undo everything".
+    fn reset(&mut self) {
+        let viewport = &mut self.params.viewport;
+        *viewport = Viewport::home(viewport.cols, viewport.rows, viewport.sample_aspect);
+        self.limit_bias = 0;
+    }
+
+    /// Switch to the next fractal.
+    fn next_kernel(&mut self) {
+        self.params.kernel = self.params.kernel.next();
+        // Home, because a view framed on one fractal says nothing about where
+        // the next one is interesting — and a Julia set at a Mandelbrot's deep
+        // zoom is usually a blank screen.
+        self.reset();
+    }
+
+    /// Switch to the next palette.
+    ///
+    /// Only the shader changes, so this never re-samples.
+    fn next_palette(&mut self) {
+        self.palette_index = (self.palette_index + 1) % Palette::count();
+        self.shader.palette = Palette::nth(self.palette_index);
     }
 
     /// Bring the frame up to date: resize, sample if needed, shade.
@@ -164,21 +290,31 @@ impl App {
                 .viewport
                 .resize(cols, rows, self.shader.mode.sample_aspect(CELL_ASPECT));
         }
-        self.params.limit = self.params.viewport.suggested_limit();
+        self.params.limit = self.biased_limit();
 
         // The entire caching policy. Palette cycling changes the shader and
         // never the params, so it never reaches the kernel.
         if self.sampled_for != Some(self.params) {
-            sample_into(
+            self.params.kernel.sample_into(
                 &mut self.samples,
                 &self.params.viewport,
-                &Mandelbrot,
                 self.params.limit,
             );
             self.sampled_for = Some(self.params);
         }
 
         shade_into(&self.shader, &self.samples, &mut self.cells);
+    }
+
+    /// The iteration limit: the viewport's suggestion, biased by `,`/`.`.
+    ///
+    /// The suggestion still tracks depth, so the bias rides on top of the
+    /// automatic behaviour rather than replacing it — zooming deeper still
+    /// raises the limit whatever the bias.
+    fn biased_limit(&self) -> u32 {
+        let suggested = f64::from(self.params.viewport.suggested_limit());
+        let scaled = suggested * 2f64.powi(self.limit_bias);
+        scaled.clamp(16.0, 100_000.0) as u32
     }
 
     /// Put the finished frame on screen.
@@ -373,9 +509,285 @@ mod tests {
     }
 
     #[test]
+    fn panning_moves_the_view_and_reverses_exactly() {
+        let mut app = updated(60, 20);
+        let home = app.params.viewport.centre;
+
+        let _ = app.handle_key(press(KeyCode::Char('l')));
+        let right = app.params.viewport.centre;
+        assert!(right.re > home.re, "l must move right");
+        assert!(
+            (right.im - home.im).abs() < 1e-12,
+            "l must not move vertically"
+        );
+
+        let _ = app.handle_key(press(KeyCode::Char('h')));
+        assert!((app.params.viewport.centre.re - home.re).abs() < 1e-12);
+
+        // And down is toward smaller imaginary parts, matching screen order.
+        let _ = app.handle_key(press(KeyCode::Char('j')));
+        assert!(app.params.viewport.centre.im < home.im, "j must move down");
+        let _ = app.handle_key(press(KeyCode::Char('k')));
+        assert!((app.params.viewport.centre.im - home.im).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_arrow_keys_pan_identically_to_hjkl() {
+        let mut letters = updated(60, 20);
+        let mut arrows = updated(60, 20);
+        for (letter, arrow) in [
+            (KeyCode::Char('h'), KeyCode::Left),
+            (KeyCode::Char('j'), KeyCode::Down),
+            (KeyCode::Char('k'), KeyCode::Up),
+            (KeyCode::Char('l'), KeyCode::Right),
+        ] {
+            let _ = letters.handle_key(press(letter));
+            let _ = arrows.handle_key(press(arrow));
+            assert_eq!(
+                letters.params.viewport, arrows.params.viewport,
+                "{letter:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn panning_feels_the_same_at_every_depth() {
+        // The reason the step is a fraction of the view: a fixed number of
+        // samples would crawl when zoomed in and leap when zoomed out. The
+        // *plane* distance must scale with the view.
+        let mut shallow = updated(60, 20);
+        let mut deep = updated(60, 20);
+        for _ in 0..10 {
+            let _ = deep.handle_key(press(KeyCode::Char('+')));
+        }
+        deep.update(Rect::new(0, 0, 60, 20));
+
+        let before_shallow = shallow.params.viewport.centre.re;
+        let before_deep = deep.params.viewport.centre.re;
+        let _ = shallow.handle_key(press(KeyCode::Char('l')));
+        let _ = deep.handle_key(press(KeyCode::Char('l')));
+
+        let shallow_move = shallow.params.viewport.centre.re - before_shallow;
+        let deep_move = deep.params.viewport.centre.re - before_deep;
+        assert!(deep_move < shallow_move, "a deep pan must cover less plane");
+        // Both as a fraction of their own view: the same fraction.
+        let a = shallow_move / shallow.params.viewport.half_width;
+        let b = deep_move / deep.params.viewport.half_width;
+        assert!((a - b).abs() < 1e-9, "{a} vs {b}");
+    }
+
+    #[test]
+    fn panning_works_in_a_terminal_too_narrow_for_the_fraction() {
+        // One twelfth of four columns rounds to zero; the step must still move.
+        let mut app = updated(4, 3);
+        let before = app.params.viewport.centre.re;
+        let _ = app.handle_key(press(KeyCode::Char('l')));
+        assert!(app.params.viewport.centre.re > before);
+    }
+
+    #[test]
+    fn zooming_in_and_out_returns_to_where_it_started() {
+        let mut app = updated(60, 20);
+        let home = app.params.viewport.half_width;
+        let _ = app.handle_key(press(KeyCode::Char('+')));
+        assert!(app.params.viewport.half_width < home, "+ must zoom in");
+        let _ = app.handle_key(press(KeyCode::Char('-')));
+        assert!((app.params.viewport.half_width - home).abs() < 1e-12);
+    }
+
+    #[test]
+    fn equals_zooms_in_so_no_modifier_is_needed() {
+        // `+` is shifted on most layouts; `=` is the same key unshifted.
+        let mut app = updated(40, 15);
+        let before = app.params.viewport.half_width;
+        let _ = app.handle_key(press(KeyCode::Char('=')));
+        assert!(app.params.viewport.half_width < before);
+    }
+
+    #[test]
+    fn zooming_in_forever_stops_at_the_precision_wall_rather_than_dissolving() {
+        // The clamp, reached through the keybinding: a user holding `+` must
+        // end up at the deepest resolvable view, not at rounding error.
+        let mut app = updated(40, 15);
+        for _ in 0..400 {
+            let _ = app.handle_key(press(KeyCode::Char('+')));
+        }
+        let viewport = app.params.viewport;
+        assert!((viewport.half_width - viewport.min_half_width()).abs() < 1e-30);
+        // And adjacent samples are still distinct, which is what the wall
+        // protects.
+        assert!(viewport.sample_to_plane(0, 0).re != viewport.sample_to_plane(1, 0).re);
+    }
+
+    #[test]
+    fn the_limit_bias_moves_the_limit_and_is_bounded() {
+        let mut app = updated(50, 20);
+        let automatic = app.params.limit;
+
+        let _ = app.handle_key(press(KeyCode::Char('.')));
+        app.update(Rect::new(0, 0, 50, 20));
+        assert!(app.params.limit > automatic, "`.` must raise the limit");
+
+        let _ = app.handle_key(press(KeyCode::Char(',')));
+        let _ = app.handle_key(press(KeyCode::Char(',')));
+        app.update(Rect::new(0, 0, 50, 20));
+        assert!(app.params.limit < automatic, "`,` must lower it");
+
+        // Bounded: the suggestion already tracks depth, so the bias is for
+        // taste and must not be a way to hang the renderer.
+        for _ in 0..50 {
+            let _ = app.handle_key(press(KeyCode::Char('.')));
+        }
+        assert_eq!(app.limit_bias, LIMIT_BIAS_RANGE);
+        for _ in 0..100 {
+            let _ = app.handle_key(press(KeyCode::Char(',')));
+        }
+        assert_eq!(app.limit_bias, -LIMIT_BIAS_RANGE);
+    }
+
+    #[test]
+    fn the_bias_rides_on_top_of_the_automatic_limit() {
+        // Zooming deeper must still raise the limit whatever the bias, or the
+        // bias would have replaced the depth tracking rather than adjusting it.
+        let mut app = updated(50, 20);
+        let _ = app.handle_key(press(KeyCode::Char(',')));
+        app.update(Rect::new(0, 0, 50, 20));
+        let shallow = app.params.limit;
+
+        for _ in 0..20 {
+            let _ = app.handle_key(press(KeyCode::Char('+')));
+        }
+        app.update(Rect::new(0, 0, 50, 20));
+        assert!(app.params.limit > shallow, "depth must still raise it");
+    }
+
+    #[test]
+    fn reset_returns_the_view_but_keeps_the_palette_and_fractal() {
+        // `r` means "take me back", not "undo everything".
+        let mut app = updated(60, 20);
+        let _ = app.handle_key(press(KeyCode::Char('p')));
+        let _ = app.handle_key(press(KeyCode::Tab));
+        let palette = app.palette_name();
+        let kernel = app.kernel_name();
+
+        for _ in 0..5 {
+            let _ = app.handle_key(press(KeyCode::Char('+')));
+            let _ = app.handle_key(press(KeyCode::Char('l')));
+        }
+        let _ = app.handle_key(press(KeyCode::Char('.')));
+        let _ = app.handle_key(press(KeyCode::Char('r')));
+
+        let home = Viewport::home(60, 20, app.params.viewport.sample_aspect);
+        assert_eq!(app.params.viewport, home);
+        assert_eq!(app.limit_bias, 0);
+        assert_eq!(app.palette_name(), palette, "reset changed the palette");
+        assert_eq!(app.kernel_name(), kernel, "reset changed the fractal");
+    }
+
+    #[test]
+    fn tab_cycles_the_fractal_and_reframes() {
+        let mut app = updated(60, 20);
+        assert_eq!(app.kernel_name(), "mandelbrot");
+
+        // Zoom somewhere first: a view framed on one fractal says nothing about
+        // where the next is interesting, so switching must reframe.
+        for _ in 0..6 {
+            let _ = app.handle_key(press(KeyCode::Char('+')));
+        }
+        let _ = app.handle_key(press(KeyCode::Tab));
+        assert_eq!(app.kernel_name(), "julia");
+        assert!((app.params.viewport.magnification() - 1.0).abs() < 1e-12);
+
+        let _ = app.handle_key(press(KeyCode::Tab));
+        assert_eq!(app.kernel_name(), "mandelbrot");
+    }
+
+    #[test]
+    fn switching_the_fractal_changes_the_picture() {
+        let mut app = updated(50, 20);
+        let mandel = app.cells.clone();
+        let _ = app.handle_key(press(KeyCode::Tab));
+        app.update(Rect::new(0, 0, 50, 20));
+        assert_ne!(app.cells, mandel, "julia rendered the same as mandelbrot");
+        // And is not blank.
+        let glyphs: std::collections::BTreeSet<char> = app.cells.cells().map(|c| c.glyph).collect();
+        assert!(glyphs.len() >= 4, "julia looks empty: {glyphs:?}");
+    }
+
+    #[test]
+    fn p_cycles_the_palette_without_re_sampling() {
+        // Only the shader changes, so the kernel must not run — the same
+        // property palette cycling relies on.
+        let mut app = updated(40, 15);
+        let first = app.palette_name();
+        let samples = app.samples.clone();
+        let cells = app.cells.clone();
+
+        let _ = app.handle_key(press(KeyCode::Char('p')));
+        app.update(Rect::new(0, 0, 40, 15));
+
+        assert_ne!(app.palette_name(), first, "the palette did not change");
+        assert_eq!(app.samples, samples, "changing the palette re-sampled");
+        assert_ne!(app.cells, cells, "the colours did not change");
+    }
+
+    #[test]
+    fn cycling_the_palette_returns_to_the_first() {
+        let mut app = updated(30, 10);
+        let first = app.palette_name();
+        for _ in 0..Palette::count() {
+            let _ = app.handle_key(press(KeyCode::Char('p')));
+        }
+        assert_eq!(app.palette_name(), first);
+    }
+
+    #[test]
+    fn a_pan_re_samples_but_a_palette_change_does_not() {
+        // The two sides of the dirty check, through the bindings.
+        let mut app = updated(40, 15);
+        let before = app.sampled_for;
+        let _ = app.handle_key(press(KeyCode::Char('l')));
+        app.update(Rect::new(0, 0, 40, 15));
+        assert_ne!(app.sampled_for, before, "a pan must re-sample");
+
+        let after_pan = app.sampled_for;
+        let _ = app.handle_key(press(KeyCode::Char('p')));
+        app.update(Rect::new(0, 0, 40, 15));
+        assert_eq!(app.sampled_for, after_pan, "a palette change re-sampled");
+    }
+
+    #[test]
+    fn every_binding_reports_continue_rather_than_a_command() {
+        // `Flow` must not become a command channel: only quitting is a
+        // loop-level outcome, and everything else mutates `App` in place.
+        let mut app = updated(30, 12);
+        for code in [
+            KeyCode::Char('h'),
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('l'),
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Char('+'),
+            KeyCode::Char('='),
+            KeyCode::Char('-'),
+            KeyCode::Char('.'),
+            KeyCode::Char(','),
+            KeyCode::Char('r'),
+            KeyCode::Tab,
+            KeyCode::Char('f'),
+            KeyCode::Char('p'),
+        ] {
+            assert_eq!(app.handle_key(press(code)), Flow::Continue, "{code:?}");
+        }
+    }
+
+    #[test]
     fn the_iteration_limit_follows_the_viewport() {
         let app = updated(50, 20);
-        assert_eq!(app.params.limit, app.params.viewport.suggested_limit());
+        assert_eq!(app.params.limit, app.biased_limit());
         assert!(app.params.limit >= 100);
     }
 }

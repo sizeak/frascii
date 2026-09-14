@@ -39,6 +39,7 @@
 mod complex;
 mod escape;
 mod fractal;
+mod kernel;
 mod sample;
 mod sampler;
 mod target;
@@ -47,6 +48,7 @@ mod viewport;
 pub use complex::Complex;
 pub use escape::{BAILOUT, escape_time};
 pub use fractal::{Fractal, Julia, Mandelbrot};
+pub use kernel::{JULIA_DEFAULT, Kernel};
 pub use sample::SampleGrid;
 pub use sampler::sample_into;
 pub use target::{boundary_target, interior_fraction, is_interesting};

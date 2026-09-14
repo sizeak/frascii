@@ -41,7 +41,21 @@ use crate::viewport::Viewport;
 ///
 /// Meanwhile the trait cost something: dynamic dispatch, or a generic parameter
 /// that goes viral through every type holding the frontend's `App`.
-pub fn sample_into(grid: &mut SampleGrid, vp: &Viewport, fractal: &dyn Fractal, limit: u32) {
+///
+/// # Dispatch
+///
+/// Generic over the kernel rather than taking `&dyn Fractal`, so `escape`
+/// inlines into the row loop. A trait object would cost an indirect call per
+/// *sample* — twenty thousand of them per frame — and, worse, would stop the
+/// optimiser seeing the iteration loop at all. Callers that need to choose a
+/// kernel at run time use [`Kernel`](crate::Kernel), which matches once per
+/// frame instead of once per sample.
+pub fn sample_into<F: Fractal + ?Sized>(
+    grid: &mut SampleGrid,
+    vp: &Viewport,
+    fractal: &F,
+    limit: u32,
+) {
     if grid.cols() != vp.cols || grid.rows() != vp.rows {
         grid.resize(vp.cols, vp.rows);
     }

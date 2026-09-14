@@ -15,7 +15,8 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use cli_args::{Cli, FractalArg, log_directive};
-use headless::{Options, Which};
+use frascii_core::{JULIA_DEFAULT, Kernel};
+use headless::Options;
 
 /// The binary's name, as users invoke it.
 ///
@@ -60,9 +61,9 @@ fn run_headless(cli: &Cli) -> ExitCode {
         frames: cli.frames,
         limit: cli.limit,
         magnification: cli.magnification,
-        which: match cli.fractal {
-            FractalArg::Mandelbrot => Which::Mandelbrot,
-            FractalArg::Julia => Which::Julia,
+        kernel: match cli.fractal {
+            FractalArg::Mandelbrot => Kernel::Mandelbrot,
+            FractalArg::Julia => Kernel::Julia { c: JULIA_DEFAULT },
         },
         ppm: cli.ppm.clone(),
     };

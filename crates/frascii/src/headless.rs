@@ -27,29 +27,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use frascii_core::{
-    Escape, Fractal, Julia, Mandelbrot, SampleGrid, Viewport, boundary_target, interior_fraction,
-    sample_into,
-};
-
-/// Which fractal a headless run should render.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Which {
-    /// The Mandelbrot set.
-    Mandelbrot,
-    /// The default Julia set.
-    Julia,
-}
-
-impl Which {
-    /// The kernel this names.
-    fn fractal(self) -> Box<dyn Fractal> {
-        match self {
-            Self::Mandelbrot => Box::new(Mandelbrot),
-            Self::Julia => Box::new(Julia::default()),
-        }
-    }
-}
+use frascii_core::{Escape, Kernel, SampleGrid, Viewport, boundary_target, interior_fraction};
 
 /// What a headless run should do.
 #[derive(Debug, Clone)]
@@ -66,7 +44,7 @@ pub(crate) struct Options {
     /// deep zoom rather than the cheap home view.
     pub(crate) magnification: f64,
     /// Which fractal.
-    pub(crate) which: Which,
+    pub(crate) kernel: Kernel,
     /// Where to write a PPM of the last frame, if anywhere.
     pub(crate) ppm: Option<std::path::PathBuf>,
 }
@@ -157,7 +135,6 @@ impl Report {
 
 /// Render `frames` frames and report how long each took.
 pub(crate) fn run(options: &Options) -> std::io::Result<Report> {
-    let fractal = options.which.fractal();
     let mut grid = SampleGrid::new(0, 0);
 
     let mut viewport = Viewport::home(options.cols, options.rows, 1.0);
@@ -165,7 +142,7 @@ pub(crate) fn run(options: &Options) -> std::io::Result<Report> {
         dive_to(
             &mut viewport,
             &mut grid,
-            fractal.as_ref(),
+            options.kernel,
             options.magnification,
         );
     }
@@ -175,7 +152,7 @@ pub(crate) fn run(options: &Options) -> std::io::Result<Report> {
 
     for _ in 0..options.frames {
         let started = Instant::now();
-        sample_into(&mut grid, &viewport, fractal.as_ref(), limit);
+        options.kernel.sample_into(&mut grid, &viewport, limit);
         timings.push(started.elapsed());
     }
 
@@ -199,13 +176,13 @@ pub(crate) fn run(options: &Options) -> std::io::Result<Report> {
 /// is answered by the cardioid shortcut. That renders an entirely black frame
 /// very fast and makes the benchmark a lie. Following `boundary_target` keeps
 /// the filigree in frame, which is the workload a real deep view has.
-fn dive_to(viewport: &mut Viewport, grid: &mut SampleGrid, fractal: &dyn Fractal, target: f64) {
+fn dive_to(viewport: &mut Viewport, grid: &mut SampleGrid, kernel: Kernel, target: f64) {
     // A factor per step small enough that the next view still contains the
     // structure the last one aimed at.
     const STEP: f64 = 8.0;
 
     while viewport.magnification() < target {
-        sample_into(grid, viewport, fractal, viewport.suggested_limit());
+        kernel.sample_into(grid, viewport, viewport.suggested_limit());
         let Some(point) = boundary_target(grid, viewport) else {
             // Nowhere left to go; stop here rather than dive into a flat field.
             break;
@@ -222,7 +199,7 @@ fn dive_to(viewport: &mut Viewport, grid: &mut SampleGrid, fractal: &dyn Fractal
     }
 
     // Leave the grid holding the view that will actually be measured.
-    sample_into(grid, viewport, fractal, viewport.suggested_limit());
+    kernel.sample_into(grid, viewport, viewport.suggested_limit());
 }
 
 /// Write the grid as a binary greyscale PGM.
@@ -264,6 +241,7 @@ fn write_ppm(path: &Path, grid: &SampleGrid) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frascii_core::JULIA_DEFAULT;
 
     /// This module's own source, read at compile time.
     const SOURCE: &str = include_str!("headless.rs");
@@ -275,7 +253,7 @@ mod tests {
             frames: 2,
             limit: Some(200),
             magnification: 1.0,
-            which: Which::Mandelbrot,
+            kernel: Kernel::Mandelbrot,
             ppm: None,
         }
     }
@@ -403,9 +381,9 @@ mod tests {
 
     #[test]
     fn both_fractals_can_be_rendered_headlessly() {
-        for which in [Which::Mandelbrot, Which::Julia] {
+        for kernel in [Kernel::Mandelbrot, Kernel::Julia { c: JULIA_DEFAULT }] {
             let mut o = options();
-            o.which = which;
+            o.kernel = kernel;
             assert_eq!(run(&o).expect("no I/O").frames.len(), 2);
         }
     }

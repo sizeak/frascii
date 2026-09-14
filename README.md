@@ -2,7 +2,7 @@
 
 A terminal ASCII-art renderer for realtime fractals — a live, colourful ASCII rendering of escape-time fractals drawn straight into your terminal.
 
-> **Status: it renders.** The Mandelbrot set draws live in glyph mode with nine truecolour palettes. Not yet interactive — pan, zoom, Julia sets, half-block mode and the motion modes are next; see [CLAUDE.md](CLAUDE.md#not-yet-designed).
+> **Status: it explores.** Mandelbrot and Julia sets, live in glyph mode, with pan, zoom and nine truecolour palettes. Half-block mode and the motion modes are next; see [CLAUDE.md](CLAUDE.md#not-yet-designed).
 
 ```
 :::::::::::::::::::::::::::::::::::::::::::::-------------------===+-----------:::::::::::::::::
@@ -88,10 +88,17 @@ tail -f target/frascii.log      # ... in another terminal
 
 | Key | Action |
 |-----|--------|
-| `q` / `Esc` | Quit |
-| `Ctrl+C` | Quit |
+| `h` `j` `k` `l`, arrows | Pan |
+| `+` / `=`, `-` | Zoom in / out |
+| `.` / `,` | Raise / lower the iteration limit |
+| `r` | Reset the view |
+| `Tab` / `f` | Next fractal (Mandelbrot, Julia) |
+| `p` | Next palette |
+| `q` / `Esc` / `Ctrl+C` | Quit |
 
-Pan, zoom, fractal selection, palette switching and the animation controls are not implemented yet.
+Zoom is about the centre — scroll-to-cursor needs mouse capture, which is not wired up yet. Half-block mode and the animation controls are also still to come.
+
+Panning moves by a fraction of the view rather than a fixed number of samples, so it feels the same at every depth. Zooming in eventually stops: at about `4e12` magnification `f64` can no longer separate adjacent samples, and the viewport refuses to go further rather than dissolving into rounding error. The iteration limit tracks depth automatically; `.` and `,` bias it up or down from there.
 
 ## How it fits together
 

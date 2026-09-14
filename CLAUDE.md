@@ -99,7 +99,9 @@ In **`frascii-tui`** — presentation and dispatch:
 - the camera and animation clock's *keybindings* (the camera's own maths is core's). The clock should be `Instant`-based: an earlier tick counter incremented only on idle polls, so any keypress skipped it, and it was deleted rather than left to be built on
 - terminal colour-capability detection. It belongs *upstream* of `to_colour`, choosing which colour is produced — not in a per-cell conversion that runs tens of thousands of times a frame
 
-The render path is built: `App::update` samples (only when its `SampleParams` changed) and shades; `App::draw` blits the finished grid and nothing else. Glyph mode and nine palettes exist; half-block, interaction and motion do not.
+The render path is built: `App::update` samples (only when its `SampleParams` changed) and shades; `App::draw` blits the finished grid and nothing else. Glyph mode, nine palettes, both kernels and keyboard interaction exist; half-block and motion do not.
+
+`Kernel` is the reason the fractal can live in `SampleParams`: an enum is `Copy + PartialEq` where a `Box<dyn Fractal>` is neither, so a trait object there would have silently broken the comparison that decides whether to re-sample. It also moves dispatch out of the inner loop — `Kernel::sample_into` matches once per frame and hands the sampler a concrete type, where `&dyn Fractal` cost an indirect call per *sample*. That second benefit went unmeasured: on a machine at load average 7, eight repeats of the same binary spread 113–145µs, so the difference is well inside the noise. The enum is justified by what it is *required* for, not by a speedup anyone has demonstrated.
 
 ### Drawing into the terminal
 
