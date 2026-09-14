@@ -95,11 +95,16 @@ In **`frascii-core`**:
 
 In **`frascii-tui`** — presentation and dispatch:
 
-- half-block / braille modes. `Cell` already carries a background, and `CellMode` already computes lattice and aspect from a subdivision pair, so a mode is a variant plus a blit
+- braille or octant modes, if ever. They reach 2×4 sub-samples but carry **one colour per cell**, which is useless for a colour-mapped fractal — 1×2 half-block is the ceiling for coloured sub-cell rendering, so this is a "probably never" rather than a "not yet"
+- zoom about the cursor, which needs mouse capture. Not merely unwired: `EnableMouseCapture` turns on all-motion reporting that has to be coalesced, and it must be disabled in the teardown **and** the panic hook or a crash leaves the user's shell eating escape codes
 - the camera and animation clock's *keybindings* (the camera's own maths is core's). The clock should be `Instant`-based: an earlier tick counter incremented only on idle polls, so any keypress skipped it, and it was deleted rather than left to be built on
 - terminal colour-capability detection. It belongs *upstream* of `to_colour`, choosing which colour is produced — not in a per-cell conversion that runs tens of thousands of times a frame
 
 The render path is built: `App::update` samples (only when its `SampleParams` changed) and shades; `App::draw` blits the finished grid and nothing else. Glyph mode, nine palettes, both kernels and keyboard interaction exist; half-block and motion do not.
+
+Half-block landed in increment 4 and **the aspect-absorption claim held**: `switching_mode_keeps_the_same_view` zooms and pans, presses `m`, and asserts the centre, width and height of the plane region are unchanged while the sample lattice doubles and the aspect halves. Nothing in core needed touching — the mode is a `CellMode` variant, a subdivision pair, and a blit.
+
+Two things that came out of building it. Half-block mode gets **no render snapshot**: `TestBackend` captures symbols only and every cell in that mode is `▀`, so a snapshot would be a uniform rectangle that passes whatever the picture does — coverage in appearance only. The packing is asserted directly instead. And a `Paragraph` overlay **recolours** a row without overwriting the glyphs under it, so the status line needed a `Clear` first or the fractal showed through to the right of the text.
 
 `Kernel` is the reason the fractal can live in `SampleParams`: an enum is `Copy + PartialEq` where a `Box<dyn Fractal>` is neither, so a trait object there would have silently broken the comparison that decides whether to re-sample. It also moves dispatch out of the inner loop — `Kernel::sample_into` matches once per frame and hands the sampler a concrete type, where `&dyn Fractal` cost an indirect call per *sample*. That second benefit went unmeasured: on a machine at load average 7, eight repeats of the same binary spread 113–145µs, so the difference is well inside the noise. The enum is justified by what it is *required* for, not by a speedup anyone has demonstrated.
 

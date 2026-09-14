@@ -41,6 +41,18 @@ fn frame(width: u16, height: u16) -> String {
     terminal.backend().to_string()
 }
 
+// Half-block mode has **no snapshot**, deliberately. `TestBackend` captures
+// symbols only, and every cell in that mode is `▀` — so a snapshot of it is a
+// uniform rectangle that would pass whatever the picture did, while still
+// failing noisily on any geometry change. It would be a test that looks like
+// coverage and is not.
+//
+// What covers that mode instead: `shade.rs` asserts the packing directly
+// (upper sample to foreground, lower to background, both 24-bit values intact),
+// and `app.rs` asserts that toggling the mode leaves the plane region
+// unchanged and doubles the sample rows. Those check the things that can
+// actually break.
+
 #[test]
 fn mandelbrot_home_view() {
     insta::assert_snapshot!(frame(60, 12));

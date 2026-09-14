@@ -2,10 +2,13 @@
 
 use std::time::{Duration, Instant};
 
-use frascii_core::{Kernel, SampleGrid, Viewport};
+use frascii_core::{Kernel, Precision, SampleGrid, Viewport};
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Clear, Paragraph};
 
 use crate::error::Result;
 use crate::palette::Palette;
@@ -103,6 +106,11 @@ pub struct App {
     palette_index: usize,
     /// Iteration limit bias, in doublings from the viewport's suggestion.
     limit_bias: i32,
+    /// Whether the status line is shown.
+    ///
+    /// Off by default so the fractal gets the whole terminal, and so the render
+    /// snapshots capture the picture rather than a line of changing numbers.
+    hud: bool,
 }
 
 impl App {
@@ -128,6 +136,7 @@ impl App {
             cells: Grid::new(0, 0),
             palette_index: 0,
             limit_bias: 0,
+            hud: false,
         }
     }
 
@@ -201,6 +210,8 @@ impl App {
             (KeyCode::Char('r' | 'R'), _) => self.reset(),
             (KeyCode::Tab | KeyCode::Char('f'), _) => self.next_kernel(),
             (KeyCode::Char('p' | 'P'), _) => self.next_palette(),
+            (KeyCode::Char('m' | 'M'), _) => self.next_mode(),
+            (KeyCode::Char('i' | 'I'), _) => self.hud = !self.hud,
 
             _ => {}
         }
@@ -271,6 +282,19 @@ impl App {
         self.shader.palette = Palette::nth(self.palette_index);
     }
 
+    /// Switch between glyph and half-block rendering.
+    ///
+    /// This does re-sample, and unavoidably: the mode changes the sample
+    /// lattice as well as the reduction. What it must *not* change is the
+    /// region of the plane on screen — the sample aspect absorbs the different
+    /// lattice exactly, which is the claim
+    /// `switching_mode_keeps_the_same_view` pins.
+    fn next_mode(&mut self) {
+        self.shader.mode = self.shader.mode.next();
+        // `update` derives the lattice and the aspect from the mode on the next
+        // frame, so nothing needs recomputing here.
+    }
+
     /// Bring the frame up to date: resize, sample if needed, shade.
     ///
     /// **All the per-frame cost lives here**, deliberately, so that
@@ -322,7 +346,62 @@ impl App {
     /// Pure and cheap: it blits an already-shaded grid. See [`App::update`] for
     /// why the cost is not here.
     pub fn draw(&self, frame: &mut Frame<'_>) {
-        frame.render_widget(&self.cells, frame.area());
+        let area = frame.area();
+        frame.render_widget(&self.cells, area);
+
+        if self.hud && area.height > 0 {
+            // Overlaid on the bottom row rather than given a row of its own:
+            // stealing a row would change the sample lattice every time the
+            // status line was toggled, and re-sample for a caption.
+            let row = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+            // `Clear` first: a `Paragraph`'s style recolours the row but only
+            // overwrites the cells its text occupies, so without this the
+            // fractal's glyphs show through to the right of the status text —
+            // which reads as corruption rather than as an overlay.
+            frame.render_widget(Clear, row);
+            frame.render_widget(self.status_line(), row);
+        }
+    }
+
+    /// The status line: what the renderer is currently doing.
+    ///
+    /// Cheap, and the point of it is that a regression gets noticed while using
+    /// the thing rather than three weeks later. The magnification and limit are
+    /// what to cross-check against `--headless` at the same size and depth; if
+    /// they diverge, the event loop is costing something the benchmark cannot
+    /// see.
+    fn status_line(&self) -> Paragraph<'static> {
+        let viewport = &self.params.viewport;
+        let dim = Style::default().fg(Color::Rgb(0x88, 0x88, 0x88));
+        let bright = Style::default()
+            .fg(Color::Rgb(0xe8, 0xe8, 0xe8))
+            .add_modifier(Modifier::BOLD);
+
+        let mut spans = vec![
+            Span::styled(self.params.kernel.name().to_owned(), bright),
+            Span::styled("  ", dim),
+            Span::styled(self.shader.mode.name().to_owned(), dim),
+            Span::styled("  ", dim),
+            Span::styled(self.shader.palette.name().to_owned(), dim),
+            Span::styled(format!("  {:.3e}x  ", viewport.magnification()), dim),
+            Span::styled(format!("iter {}", self.params.limit), dim),
+        ];
+
+        // Only shown when it means something. At `Ample` the user does not need
+        // to know the precision wall exists.
+        match viewport.precision() {
+            Precision::Ample => {}
+            Precision::Marginal => spans.push(Span::styled(
+                "  precision: marginal".to_owned(),
+                Style::default().fg(Color::Rgb(0xd0, 0xa0, 0x30)),
+            )),
+            Precision::Exhausted => spans.push(Span::styled(
+                "  precision: exhausted (max zoom)".to_owned(),
+                Style::default().fg(Color::Rgb(0xd0, 0x50, 0x40)),
+            )),
+        }
+
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(0x10, 0x10, 0x18)))
     }
 
     /// Own the terminal until the user quits.
@@ -757,6 +836,135 @@ mod tests {
     }
 
     #[test]
+    fn m_toggles_the_render_mode_and_changes_the_glyphs() {
+        let mut app = updated(40, 16);
+        assert!(
+            app.cells.cells().any(|c| c.glyph != '▀'),
+            "glyph mode should use the ramp"
+        );
+
+        let _ = app.handle_key(press(KeyCode::Char('m')));
+        app.update(Rect::new(0, 0, 40, 16));
+        assert!(
+            app.cells.cells().all(|c| c.glyph == '▀'),
+            "half-block should be one glyph"
+        );
+        // Twice the samples, same cells.
+        assert_eq!((app.cells.width(), app.cells.height()), (40, 16));
+        assert_eq!((app.samples.cols(), app.samples.rows()), (40, 32));
+
+        let _ = app.handle_key(press(KeyCode::Char('m')));
+        app.update(Rect::new(0, 0, 40, 16));
+        assert_eq!((app.samples.cols(), app.samples.rows()), (40, 16));
+    }
+
+    #[test]
+    fn switching_mode_keeps_the_same_view() {
+        // **The claim the whole core/frontend split rests on**, checked through
+        // the real binding rather than by hand-picked numbers: pressing `m`
+        // must change the sample lattice and the reduction while leaving the
+        // region of the plane on screen exactly where it was.
+        let mut app = updated(80, 24);
+        for _ in 0..5 {
+            let _ = app.handle_key(press(KeyCode::Char('+')));
+        }
+        let _ = app.handle_key(press(KeyCode::Char('l')));
+        app.update(Rect::new(0, 0, 80, 24));
+
+        let before = app.params.viewport;
+        let (w, h, c) = (before.half_width, before.half_height(), before.centre);
+
+        let _ = app.handle_key(press(KeyCode::Char('m')));
+        app.update(Rect::new(0, 0, 80, 24));
+        let after = app.params.viewport;
+
+        assert_eq!(after.centre, c, "the view moved");
+        assert!((after.half_width - w).abs() < 1e-12, "the width changed");
+        assert!(
+            (after.half_height() - h).abs() < 1e-12,
+            "the height changed: {} vs {h}",
+            after.half_height()
+        );
+        // And it really did change the lattice, or the test proves nothing.
+        assert_ne!(after.rows, before.rows);
+        assert!((after.sample_aspect - before.sample_aspect / 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn half_block_resolves_detail_glyph_mode_cannot() {
+        // The reason the mode exists: twice the vertical samples. A thin
+        // feature that lands between glyph rows should show up in half-block.
+        let glyph = updated(60, 20);
+        let mut half = updated(60, 20);
+        let _ = half.handle_key(press(KeyCode::Char('m')));
+        half.update(Rect::new(0, 0, 60, 20));
+
+        assert_eq!(half.samples.rows(), glyph.samples.rows() * 2);
+        // Distinct colours are the signal in half-block, since the glyph is
+        // constant: two per cell rather than one.
+        let colours = |app: &App| {
+            app.cells
+                .cells()
+                .flat_map(|c| {
+                    [
+                        (c.colour.r, c.colour.g, c.colour.b),
+                        (c.background.r, c.background.g, c.background.b),
+                    ]
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        };
+        assert!(
+            colours(&half) > colours(&glyph),
+            "half-block {} vs glyph {}",
+            colours(&half),
+            colours(&glyph)
+        );
+    }
+
+    #[test]
+    fn i_toggles_the_status_line_and_it_is_off_by_default() {
+        let mut app = updated(40, 12);
+        assert!(!app.hud, "the status line must start hidden");
+        let _ = app.handle_key(press(KeyCode::Char('i')));
+        assert!(app.hud);
+        let _ = app.handle_key(press(KeyCode::Char('i')));
+        assert!(!app.hud);
+    }
+
+    #[test]
+    fn the_status_line_only_warns_when_precision_is_actually_short() {
+        // At the home view there is nothing to warn about, and a permanent
+        // warning is a warning nobody reads.
+        let app = updated(60, 20);
+        assert_eq!(app.params.viewport.precision(), Precision::Ample);
+
+        let mut deep = updated(60, 20);
+        for _ in 0..400 {
+            let _ = deep.handle_key(press(KeyCode::Char('+')));
+        }
+        deep.update(Rect::new(0, 0, 60, 20));
+        assert_ne!(
+            deep.params.viewport.precision(),
+            Precision::Ample,
+            "at the wall the user should be told why zooming stopped"
+        );
+    }
+
+    #[test]
+    fn toggling_the_status_line_never_re_samples() {
+        // It is overlaid on the bottom row rather than given a row of its own,
+        // precisely so that showing it does not change the sample lattice.
+        let mut app = updated(50, 18);
+        let before = app.sampled_for;
+        let samples = app.samples.clone();
+        let _ = app.handle_key(press(KeyCode::Char('i')));
+        app.update(Rect::new(0, 0, 50, 18));
+        assert_eq!(app.sampled_for, before);
+        assert_eq!(app.samples, samples);
+    }
+
+    #[test]
     fn every_binding_reports_continue_rather_than_a_command() {
         // `Flow` must not become a command channel: only quitting is a
         // loop-level outcome, and everything else mutates `App` in place.
@@ -779,6 +987,8 @@ mod tests {
             KeyCode::Tab,
             KeyCode::Char('f'),
             KeyCode::Char('p'),
+            KeyCode::Char('m'),
+            KeyCode::Char('i'),
         ] {
             assert_eq!(app.handle_key(press(code)), Flow::Continue, "{code:?}");
         }

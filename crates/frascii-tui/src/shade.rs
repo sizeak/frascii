@@ -34,6 +34,19 @@ pub enum CellMode {
     /// frascii ASCII art rather than a low-resolution image viewer.
     #[default]
     Glyph,
+    /// Two vertically stacked samples per cell, each with its own colour.
+    ///
+    /// Twice the vertical resolution and square-ish pixels, at the cost of the
+    /// glyph ramp: this mode carries density in colour alone. It is not ASCII
+    /// art — it is a 2× vertical pixel display — which is exactly why
+    /// [`CellMode::Glyph`] is the default and this is the escape hatch for
+    /// detail.
+    ///
+    /// 1×2 is the ceiling for *coloured* sub-cell rendering in a terminal.
+    /// Braille and the legacy-computing octants reach 2×4, but every one of
+    /// them can carry only a single colour per cell, which is useless for a
+    /// colour-mapped fractal.
+    HalfBlock,
 }
 
 impl CellMode {
@@ -42,6 +55,25 @@ impl CellMode {
     pub const fn subdivisions(self) -> (usize, usize) {
         match self {
             Self::Glyph => (1, 1),
+            Self::HalfBlock => (1, 2),
+        }
+    }
+
+    /// The next mode, for a toggle.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Glyph => Self::HalfBlock,
+            Self::HalfBlock => Self::Glyph,
+        }
+    }
+
+    /// The mode's name, for a status line.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Glyph => "glyph",
+            Self::HalfBlock => "half-block",
         }
     }
 
@@ -108,6 +140,54 @@ pub fn shade_into(shader: &Shader, samples: &SampleGrid, out: &mut Grid) {
 
     match shader.mode {
         CellMode::Glyph => shade_glyph(shader, samples, out),
+        CellMode::HalfBlock => shade_half_block(shader, samples, out),
+    }
+}
+
+/// The upper-half block.
+///
+/// Only this one, never `▄`: a lower block with the colours swapped is
+/// pixel-identical, so one glyph keeps the blit branchless and every cell
+/// single-width — which also keeps the terminal diff out of its
+/// wide-character path.
+const UPPER_HALF: char = '▀';
+
+/// Two stacked samples per cell: the upper becomes the foreground, the lower
+/// the background.
+///
+/// No colour is lost when they differ — both 24-bit values survive in the one
+/// cell, which is what makes this mode worth having over braille.
+fn shade_half_block(shader: &Shader, samples: &SampleGrid, out: &mut Grid) {
+    for iy in 0..out.height() {
+        for ix in 0..out.width() {
+            let upper = samples.get(ix, iy * 2);
+            let lower = samples.get(ix, iy * 2 + 1);
+            // A missing lower row happens when the sample grid has an odd
+            // height, which a resize can produce for a frame. Reuse the upper
+            // sample rather than skipping the cell: a black half would read as
+            // a one-pixel gap along the bottom edge.
+            let Some(upper) = upper else {
+                continue;
+            };
+            let lower = lower.unwrap_or(upper);
+            out.set(
+                ix,
+                iy,
+                Cell::with_background(
+                    UPPER_HALF,
+                    colour_for(shader, upper),
+                    colour_for(shader, lower),
+                ),
+            );
+        }
+    }
+}
+
+/// The colour a sample takes, with interior rendering as black.
+fn colour_for(shader: &Shader, escape: frascii_core::Escape) -> crate::render::Rgb {
+    match escape.smooth() {
+        Some(smooth) => shader.palette.at(smooth + shader.phase),
+        None => crate::render::Rgb::BLACK,
     }
 }
 
@@ -168,13 +248,148 @@ mod tests {
     }
 
     #[test]
+    fn half_block_mode_is_two_stacked_samples_per_cell() {
+        assert_eq!(CellMode::HalfBlock.subdivisions(), (1, 2));
+        assert_eq!(CellMode::HalfBlock.lattice(80, 24), (80, 48));
+    }
+
+    #[test]
+    fn the_modes_toggle_and_name_themselves() {
+        assert_eq!(CellMode::Glyph.next(), CellMode::HalfBlock);
+        assert_eq!(CellMode::HalfBlock.next(), CellMode::Glyph);
+        assert_eq!(CellMode::Glyph.name(), "glyph");
+        assert_eq!(CellMode::HalfBlock.name(), "half-block");
+    }
+
+    #[test]
+    fn both_modes_cover_the_same_plane_for_the_same_cells() {
+        // **The load-bearing claim of the whole core/frontend split.** A mode
+        // change must alter only the numbers handed to core — the sample
+        // lattice and the aspect — never the region of the plane on screen. If
+        // these disagree, pressing `m` would jump the view and the aspect
+        // parameter would not be absorbing the sub-cell layout after all.
+        const CELLS: (usize, usize) = (100, 30);
+        const CELL_ASPECT: f64 = 2.0;
+
+        let mut views = Vec::new();
+        for mode in [CellMode::Glyph, CellMode::HalfBlock] {
+            let (cols, rows) = mode.lattice(CELLS.0, CELLS.1);
+            let vp = frascii_core::Viewport::home(cols, rows, mode.sample_aspect(CELL_ASPECT));
+            views.push((vp.half_width, vp.half_height(), vp.centre));
+        }
+        let (gw, gh, gc) = views[0];
+        let (hw, hh, hc) = views[1];
+        assert!((gw - hw).abs() < 1e-12, "widths differ: {gw} vs {hw}");
+        assert!((gh - hh).abs() < 1e-12, "heights differ: {gh} vs {hh}");
+        assert_eq!(gc, hc, "centres differ");
+    }
+
+    #[test]
+    fn half_block_puts_the_upper_sample_in_the_foreground() {
+        // The packing, checked against a hand-written grid: two rows collapse
+        // into one cell, upper to fg and lower to bg, with both colours intact.
+        let samples = grid_from(&[&[escaped(3.0)], &[escaped(300.0)]]);
+        let mut out = Grid::new(0, 0);
+        let shader = Shader {
+            mode: CellMode::HalfBlock,
+            ..Shader::default()
+        };
+        shade_into(&shader, &samples, &mut out);
+
+        assert_eq!((out.width(), out.height()), (1, 1));
+        let cell = out.get(0, 0).expect("one cell");
+        assert_eq!(cell.glyph, '▀');
+        assert_eq!(cell.colour, shader.palette.at(3.0));
+        assert_eq!(cell.background, shader.palette.at(300.0));
+        assert_ne!(cell.colour, cell.background, "both colours must survive");
+    }
+
+    #[test]
+    fn half_block_halves_the_row_count() {
+        let samples = SampleGrid::new(7, 8);
+        let mut out = Grid::new(0, 0);
+        shade_into(
+            &Shader {
+                mode: CellMode::HalfBlock,
+                ..Shader::default()
+            },
+            &samples,
+            &mut out,
+        );
+        assert_eq!((out.width(), out.height()), (7, 4));
+    }
+
+    #[test]
+    fn an_odd_sample_height_reuses_the_upper_half_rather_than_gapping() {
+        // A resize can hand us an odd row count for a frame. Filling the
+        // missing lower half with black would read as a one-pixel gap along the
+        // bottom edge, which looks like a rendering bug.
+        let samples = grid_from(&[&[escaped(5.0)], &[escaped(5.0)], &[escaped(9.0)]]);
+        let mut out = Grid::new(0, 0);
+        let shader = Shader {
+            mode: CellMode::HalfBlock,
+            ..Shader::default()
+        };
+        shade_into(&shader, &samples, &mut out);
+        // Three rows give one full cell; the odd row is dropped by the integer
+        // division, so nothing is half-drawn.
+        assert_eq!(out.height(), 1);
+        let cell = out.get(0, 0).expect("one cell");
+        assert_eq!(
+            cell.colour, cell.background,
+            "both halves came from row 0/1"
+        );
+    }
+
+    #[test]
+    fn half_block_interior_is_black_on_both_halves() {
+        let samples = grid_from(&[&[Escape::Interior], &[Escape::Interior]]);
+        let mut out = Grid::new(0, 0);
+        shade_into(
+            &Shader {
+                mode: CellMode::HalfBlock,
+                ..Shader::default()
+            },
+            &samples,
+            &mut out,
+        );
+        let cell = out.get(0, 0).expect("one cell");
+        assert_eq!(cell.colour, crate::render::Rgb::BLACK);
+        assert_eq!(cell.background, crate::render::Rgb::BLACK);
+    }
+
+    #[test]
+    fn half_block_carries_no_glyph_ramp() {
+        // Density is colour alone in this mode, so every cell is the same
+        // glyph. Stated as a test because it is the mode's defining property
+        // and the reason glyph mode remains the default.
+        let samples = grid_from(&[
+            &[escaped(1.0), escaped(50.0), Escape::Interior],
+            &[escaped(400.0), Escape::Interior, escaped(7.0)],
+        ]);
+        let mut out = Grid::new(0, 0);
+        shade_into(
+            &Shader {
+                mode: CellMode::HalfBlock,
+                ..Shader::default()
+            },
+            &samples,
+            &mut out,
+        );
+        assert!(out.cells().all(|c| c.glyph == '▀'), "the ramp leaked in");
+    }
+
+    #[test]
     fn the_sample_aspect_follows_the_subdivision_formula() {
         // Glyph mode: one sample spans a whole cell, so a sample is as tall as
         // a cell — twice its width.
         assert!((CellMode::Glyph.sample_aspect(2.0) - 2.0).abs() < 1e-12);
-        // And it tracks the cell aspect rather than hardcoding it, which is the
-        // knob a user with an unusual font would reach for.
+        // Half-block: two stacked samples, so each is square.
+        assert!((CellMode::HalfBlock.sample_aspect(2.0) - 1.0).abs() < 1e-12);
+        // And both track the cell aspect rather than hardcoding it, which is
+        // the knob a user with an unusual font would reach for.
         assert!((CellMode::Glyph.sample_aspect(2.4) - 2.4).abs() < 1e-12);
+        assert!((CellMode::HalfBlock.sample_aspect(2.4) - 1.2).abs() < 1e-12);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 A terminal ASCII-art renderer for realtime fractals — a live, colourful ASCII rendering of escape-time fractals drawn straight into your terminal.
 
-> **Status: it explores.** Mandelbrot and Julia sets, live in glyph mode, with pan, zoom and nine truecolour palettes. Half-block mode and the motion modes are next; see [CLAUDE.md](CLAUDE.md#not-yet-designed).
+> **Status: it explores.** Mandelbrot and Julia sets in glyph or half-block rendering, with pan, zoom, nine truecolour palettes and a status line. The motion modes — palette cycling, Julia orbit, unattended auto-zoom — are next; see [CLAUDE.md](CLAUDE.md#not-yet-designed).
 
 ```
 :::::::::::::::::::::::::::::::::::::::::::::-------------------===+-----------:::::::::::::::::
@@ -94,9 +94,13 @@ tail -f target/frascii.log      # ... in another terminal
 | `r` | Reset the view |
 | `Tab` / `f` | Next fractal (Mandelbrot, Julia) |
 | `p` | Next palette |
+| `m` | Glyph / half-block rendering |
+| `i` | Status line |
 | `q` / `Esc` / `Ctrl+C` | Quit |
 
-Zoom is about the centre — scroll-to-cursor needs mouse capture, which is not wired up yet. Half-block mode and the animation controls are also still to come.
+**Pan before you zoom.** Zoom is about the centre of the view, and the home view is centred on `-0.75`, which is *inside* the set — so pressing `+` from a fresh start dives into the solid interior and the screen goes blank. Pan to some boundary filigree first. Scroll-to-cursor would fix this properly and needs mouse capture, which is not wired up yet; the unattended auto-zoom mode will use core's `boundary_target` to pick somewhere worth diving into.
+
+`m` switches between one sample per cell shaded by the glyph ramp, and two vertically stacked samples per cell each with its own colour. Half-block doubles the vertical resolution but carries density in colour alone — it is a pixel display rather than ASCII art, which is why glyph mode is the default. 1×2 is the ceiling for *coloured* sub-cell rendering: braille and the legacy-computing octants reach 2×4 but can only carry one colour per cell.
 
 Panning moves by a fraction of the view rather than a fixed number of samples, so it feels the same at every depth. Zooming in eventually stops: at about `4e12` magnification `f64` can no longer separate adjacent samples, and the viewport refuses to go further rather than dissolving into rounding error. The iteration limit tracks depth automatically; `.` and `,` bias it up or down from there.
 
