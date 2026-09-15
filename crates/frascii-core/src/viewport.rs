@@ -9,8 +9,9 @@ use crate::complex::Complex;
 
 /// The half-width of the home view, in plane units.
 ///
-/// The classic framing: real from -2.25 to 0.75, which holds the whole set with
-/// a margin.
+/// The classic framing: with [`HOME_CENTRE`] at -0.75 this spans real -2.5 to
+/// 1.0, which holds the whole set with a margin. (It read "-2.25 to 0.75" until
+/// a review did the arithmetic — that range is a half-width of 1.5.)
 pub const HOME_HALF_WIDTH: f64 = 1.75;
 
 /// The centre of the home view.

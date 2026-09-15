@@ -30,10 +30,18 @@ use crate::App;
 ///
 /// `update` then `draw`, in that order, because that is the split the app is
 /// built around and a snapshot of `draw` alone would capture an empty grid.
-/// Nothing here consults a clock, so these are deterministic — which is the
-/// property that makes them worth having.
+///
+/// The kernel and the drive are pinned rather than inherited from `App::new`.
+/// These snapshots are named for the Mandelbrot and exist to pin *its* glyph
+/// ramp and plane↔sample geometry, so they must not move when the shipped
+/// default moves — which it has: the launch view is now an orbiting Julia set.
+/// Pinning also makes the determinism real instead of incidental. `update`
+/// takes `Instant::now()`, and these only came out stable because `Clock`'s
+/// first tick returns zero and `powf(0.0)` is 1; with the motion switched off
+/// there is nothing for a clock to feed.
 fn frame(width: u16, height: u16) -> String {
     let mut app = App::new();
+    app.pin_for_snapshot();
     // The status bar is hidden for these: it carries a magnification and an
     // iteration count, so a snapshot including it would fail on any change to
     // the defaults rather than on a change to the *rendering*, which is what

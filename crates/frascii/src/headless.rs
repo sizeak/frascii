@@ -251,7 +251,19 @@ fn write_ppm(path: &Path, grid: &SampleGrid) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frascii_core::JULIA_DEFAULT;
+    use frascii_core::FormulaKind;
+
+    /// Every fractal the program can render: both planes of every formula.
+    ///
+    /// Built from `FormulaKind::ALL` rather than listed, so a new formula is
+    /// covered here the moment it exists. The previous version of this test
+    /// named two kernels and was called "both fractals" while there were six.
+    fn every_kernel() -> Vec<Kernel> {
+        FormulaKind::ALL
+            .iter()
+            .flat_map(|f| [Kernel::Parameter(*f), Kernel::julia_of(*f)])
+            .collect()
+    }
 
     /// This module's own source, read at compile time.
     const SOURCE: &str = include_str!("headless.rs");
@@ -263,7 +275,7 @@ mod tests {
             frames: 2,
             limit: Some(200),
             magnification: 1.0,
-            kernel: Kernel::Mandelbrot,
+            kernel: Kernel::MANDELBROT,
             ppm: None,
         }
     }
@@ -423,8 +435,8 @@ mod tests {
     }
 
     #[test]
-    fn both_fractals_can_be_rendered_headlessly() {
-        for kernel in [Kernel::Mandelbrot, Kernel::Julia { c: JULIA_DEFAULT }] {
+    fn every_fractal_can_be_rendered_headlessly() {
+        for kernel in every_kernel() {
             let mut o = options();
             o.kernel = kernel;
             assert_eq!(run(&o).expect("no I/O").frames.len(), 2);

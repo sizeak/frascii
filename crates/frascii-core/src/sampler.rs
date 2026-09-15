@@ -146,7 +146,12 @@ mod tests {
         let mut m = SampleGrid::new(0, 0);
         let mut j = SampleGrid::new(0, 0);
         sample_into(&mut m, &vp, &Mandelbrot, 300);
-        sample_into(&mut j, &vp, &Julia::new(Complex::new(-0.8, 0.156)), 300);
+        sample_into(
+            &mut j,
+            &vp,
+            &Julia::<crate::formula::Quadratic>::new(Complex::new(-0.8, 0.156)),
+            300,
+        );
         assert_ne!(m, j);
     }
 

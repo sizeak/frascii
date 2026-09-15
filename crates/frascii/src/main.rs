@@ -14,8 +14,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use cli_args::{Cli, FractalArg, log_directive};
-use frascii_core::{JULIA_DEFAULT, Kernel};
+use cli_args::{Cli, log_directive};
 use headless::Options;
 
 /// The binary's name, as users invoke it.
@@ -61,14 +60,7 @@ fn run_headless(cli: &Cli) -> ExitCode {
         frames: cli.frames,
         limit: cli.limit,
         magnification: cli.magnification,
-        kernel: match cli.fractal {
-            FractalArg::Mandelbrot => Kernel::Mandelbrot,
-            FractalArg::Julia => Kernel::Julia { c: JULIA_DEFAULT },
-            FractalArg::BurningShip => Kernel::BurningShip,
-            FractalArg::Tricorn => Kernel::Tricorn,
-            FractalArg::Celtic => Kernel::Celtic,
-            FractalArg::Multibrot3 => Kernel::Multibrot3,
-        },
+        kernel: cli.fractal.kernel(cli.julia),
         ppm: cli.ppm.clone(),
     };
 

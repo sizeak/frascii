@@ -1,5 +1,7 @@
 //! The fractals themselves: what `z0` and `c` are for a point on the plane.
 
+use core::marker::PhantomData;
+
 use crate::Escape;
 use crate::complex::Complex;
 use crate::escape::escape_time;
@@ -14,9 +16,6 @@ use crate::formula::{self, Formula};
 pub trait Fractal: Send + Sync {
     /// Classify the point `p` at the given iteration limit.
     fn escape(&self, p: Complex, limit: u32) -> Escape;
-
-    /// The fractal's name, for a status line.
-    fn name(&self) -> &'static str;
 
     /// A view framing the whole set, as a centre and half-width.
     ///
@@ -44,84 +43,45 @@ impl Fractal for Mandelbrot {
         escape_time::<formula::Quadratic>(Complex::ZERO, p, limit)
     }
 
-    fn name(&self) -> &'static str {
-        "mandelbrot"
-    }
-
     fn home(&self) -> (Complex, f64) {
         home_of::<formula::Quadratic>()
     }
 }
 
-/// The Burning Ship, `z → (|Re z| + i|Im z|)² + c`.
+/// A formula's parameter plane: `z₀ = 0`, and the sampled point is `c`.
+///
+/// One generic type where there were four hand-written structs, each of which
+/// did nothing but name a formula. The formula is the only thing that differed,
+/// so it is the only thing this carries — and a new formula now needs no new
+/// fractal type at all.
+///
+/// [`Mandelbrot`] stays separate rather than becoming `Parameter<Quadratic>`,
+/// because it alone has the exact cardioid shortcut. That is a fact about the
+/// quadratic's parameter plane and about no other formula, so it cannot live
+/// here without being wrong for the other four.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct BurningShip;
+pub struct Parameter<F> {
+    /// Which formula is being iterated. Zero-sized; it only picks the `step`.
+    formula: PhantomData<F>,
+}
 
-impl Fractal for BurningShip {
-    fn escape(&self, p: Complex, limit: u32) -> Escape {
-        escape_time::<formula::BurningShip>(Complex::ZERO, p, limit)
-    }
-
-    fn name(&self) -> &'static str {
-        "burning ship"
-    }
-
-    fn home(&self) -> (Complex, f64) {
-        home_of::<formula::BurningShip>()
+impl<F: Formula> Parameter<F> {
+    /// This formula's parameter plane.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            formula: PhantomData,
+        }
     }
 }
 
-/// The Tricorn, `z → conj(z)² + c`.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Tricorn;
-
-impl Fractal for Tricorn {
+impl<F: Formula + Send + Sync> Fractal for Parameter<F> {
     fn escape(&self, p: Complex, limit: u32) -> Escape {
-        escape_time::<formula::Tricorn>(Complex::ZERO, p, limit)
-    }
-
-    fn name(&self) -> &'static str {
-        "tricorn"
+        escape_time::<F>(Complex::ZERO, p, limit)
     }
 
     fn home(&self) -> (Complex, f64) {
-        home_of::<formula::Tricorn>()
-    }
-}
-
-/// The Celtic, `z → |Re(z²)| + i·Im(z²) + c`.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Celtic;
-
-impl Fractal for Celtic {
-    fn escape(&self, p: Complex, limit: u32) -> Escape {
-        escape_time::<formula::Celtic>(Complex::ZERO, p, limit)
-    }
-
-    fn name(&self) -> &'static str {
-        "celtic"
-    }
-
-    fn home(&self) -> (Complex, f64) {
-        home_of::<formula::Celtic>()
-    }
-}
-
-/// The degree-3 Multibrot, `z → z³ + c`.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Multibrot3;
-
-impl Fractal for Multibrot3 {
-    fn escape(&self, p: Complex, limit: u32) -> Escape {
-        escape_time::<formula::Cubic>(Complex::ZERO, p, limit)
-    }
-
-    fn name(&self) -> &'static str {
-        "multibrot³"
-    }
-
-    fn home(&self) -> (Complex, f64) {
-        home_of::<formula::Cubic>()
+        home_of::<F>()
     }
 }
 
@@ -133,23 +93,40 @@ fn home_of<F: Formula>() -> (Complex, f64) {
 
 /// A Julia set: the sampled point is `z₀`, and `c` is the set's parameter.
 ///
-/// `c` is what makes Julia worth having as the second kernel — it is a live
-/// parameter the UI can move, where Mandelbrot has none.
+/// Generic over the formula, because **every** formula here has a Julia family
+/// — the parameter plane and the dynamical plane are two ways of reading the
+/// same iteration, not two different fractals. Binding this to the quadratic
+/// (as it was) left four formulas with no Julia at all and no reason for it.
+///
+/// `c` is what makes a Julia set worth having: it is a live parameter the UI can
+/// move, where a parameter-plane set has none. See
+/// [`julia_parameter`](crate::julia_parameter) for the loop it moves along.
 #[derive(Debug, Clone, Copy)]
-pub struct Julia {
+pub struct Julia<F = formula::Quadratic> {
     /// The parameter that selects which Julia set this is.
     pub c: Complex,
+    /// Which formula is being iterated. Zero-sized; it only picks the `step`.
+    formula: PhantomData<F>,
 }
 
-impl Julia {
+impl<F: Formula> Julia<F> {
     /// A Julia set for the given parameter.
     #[must_use]
     pub const fn new(c: Complex) -> Self {
-        Self { c }
+        Self {
+            c,
+            formula: PhantomData,
+        }
+    }
+
+    /// The Julia set at `turns` around this formula's parameter loop.
+    #[must_use]
+    pub fn at_turn(turns: f64) -> Self {
+        Self::new(crate::orbit::julia_parameter::<F>(turns))
     }
 }
 
-impl Default for Julia {
+impl Default for Julia<formula::Quadratic> {
     /// Douady's rabbit, at `-0.123 + 0.745i`.
     ///
     /// Chosen by measuring rather than by reputation: over the default view it
@@ -158,28 +135,27 @@ impl Default for Julia {
     /// by density has almost nothing to shade — it would make the first frame a
     /// user ever sees look like a rendering bug.
     fn default() -> Self {
-        Self::new(Complex::new(-0.123, 0.745))
+        Self::new(crate::kernel::JULIA_DEFAULT)
     }
 }
 
-impl Fractal for Julia {
+impl<F: Formula + Send + Sync> Fractal for Julia<F> {
     fn escape(&self, p: Complex, limit: u32) -> Escape {
         // No cardioid shortcut here, and that is not an omission: the cardioid
         // is a fact about the *Mandelbrot parameter plane*. Applying it to a
         // Julia set would be nonsense, which is why the test lives on
         // `Mandelbrot::escape` rather than inside the shared loop.
-        escape_time::<formula::Quadratic>(p, self.c, limit)
-    }
-
-    fn name(&self) -> &'static str {
-        "julia"
+        escape_time::<F>(p, self.c, limit)
     }
 
     fn home(&self) -> (Complex, f64) {
         // A Julia set lives in the *dynamical* plane, not the parameter plane,
-        // and is always contained in the disc of radius 2 — so its framing is
-        // its own rather than the quadratic's parameter-plane framing.
-        (Complex::ZERO, 1.7)
+        // so its framing is its own and not the formula's `HOME_HALF_WIDTH`.
+        // Centred on the origin because the filled Julia set of `z^d + c` is
+        // contained in the disc of radius `(1 + sqrt(1 + 4|c|)) / 2` about it,
+        // which is within 2 whenever `|c| <= 2` — true for every parameter the
+        // baked orbits visit.
+        (Complex::ZERO, F::JULIA_HALF_WIDTH)
     }
 }
 
@@ -257,7 +233,7 @@ mod tests {
         // The defining difference from Mandelbrot: at c = 0 the Julia set is
         // the unit disc, so a point inside stays bounded and one outside runs
         // away — regardless of where it sits relative to the Mandelbrot set.
-        let julia = Julia::new(Complex::ZERO);
+        let julia = Julia::<formula::Quadratic>::new(Complex::ZERO);
         assert!(julia.escape(Complex::new(0.5, 0.0), 500).is_interior());
         assert!(!julia.escape(Complex::new(1.5, 0.0), 500).is_interior());
 
@@ -286,7 +262,7 @@ mod tests {
                 );
                 assert_eq!(
                     Mandelbrot.escape(c, LIMIT),
-                    Julia::new(c).escape(Complex::ZERO, LIMIT),
+                    Julia::<formula::Quadratic>::new(c).escape(Complex::ZERO, LIMIT),
                     "disagreement at c = {c:?}"
                 );
             }
@@ -325,12 +301,6 @@ mod tests {
                 .escape(Complex::new(0.2501, 0.0), 100_000)
                 .is_interior()
         );
-    }
-
-    #[test]
-    fn both_kernels_name_themselves() {
-        assert_eq!(Mandelbrot.name(), "mandelbrot");
-        assert_eq!(Julia::default().name(), "julia");
     }
 
     #[test]

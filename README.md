@@ -2,7 +2,7 @@
 
 A terminal ASCII-art renderer for realtime fractals — a live, colourful ASCII rendering of escape-time fractals drawn straight into your terminal.
 
-> **Status: it runs.** Launch it and the Mandelbrot set dives forever with the colours drifting. Mandelbrot and Julia sets, glyph or half-block rendering, optional supersampling, pan and zoom, nine truecolour palettes, a Julia parameter orbit. What is deliberately *not* here is listed in [CLAUDE.md](CLAUDE.md#not-yet-designed).
+> **Status: it runs.** Launch it and a Julia set morphs forever with the colours drifting. Five formulas, each with both a parameter plane and a family of Julia sets — ten fractals from two keys — plus glyph or half-block rendering, optional supersampling, pan and zoom, nine truecolour palettes, a parameter orbit and an unattended dive. What is deliberately *not* here is listed in [CLAUDE.md](CLAUDE.md#not-yet-designed).
 
 ```
 :::::::::::::::::::::::::::::::::::::::::::::-------------------===+-----------:::::::::::::::::
@@ -55,9 +55,10 @@ Options:
       --rows <N>           Samples down [default: 100]
       --limit <N>          Iteration limit (default: scaled to the magnification)
       --magnification <X>  Magnification to render at [default: 1]
-      --fractal <FRACTAL>  Which fractal to render
-      --ppm <FILE>         Write the last frame as a binary PPM
-  -h, --help               Print help
+      --fractal <FRACTAL>  Which formula to render [default: mandelbrot] [possible values: mandelbrot, burning-ship, tricorn, celtic, multibrot3]
+      --julia              Render the Julia sets of that formula rather than its parameter plane
+      --ppm <FILE>         Write the last frame as a binary PGM
+  -h, --help               Print help (see more with '--help')
   -V, --version            Print version
 ```
 
@@ -67,15 +68,15 @@ Options:
 
 ```sh
 $ frascii --headless --cols 200 --rows 100 --frames 30 --magnification 1e6
-20000 samples/frame, limit 2691, backend cpu
-30 frames: mean 5.27ms, worst 5.84ms -> 189.7 fps
+20000 samples/frame, limit 2691, magnification 1.000e6, backend cpu
+30 frames: mean 5.94ms, worst 7.91ms -> 168.3 fps
 meets 30fps
 frame was 11.1% interior
 ```
 
 It exists for two reasons beyond benchmarking. It reports the **interior fraction** because a run that renders a solid black frame can look 85× faster than real work — the cardioid shortcut answers an all-interior view instantly — so the number is printed and flagged when the view is not representative. And it consumes `frascii-core` without touching the frontend at all, which keeps core honest about being usable on its own. (A source-scan test enforces that, not the compiler: cargo dependencies are per-package, so the frontend is technically in scope there.)
 
-`--ppm` writes the last frame as a binary greyscale PGM, for checking geometry.
+`--ppm` writes the last frame as a binary greyscale PGM, for checking geometry. (The flag is named for the format it does not emit; the file is a P5 PGM.)
 
 `--log` takes a file rather than a stream because the TUI owns the alternate screen: a log line on stdout or stderr is painted over the render. Tail it from a second terminal:
 
@@ -92,7 +93,8 @@ tail -f target/frascii.log      # ... in another terminal
 | `+` / `=`, `-` | Zoom in / out |
 | `.` / `,` | Raise / lower the iteration limit |
 | `r` | Reset the view |
-| `Tab` / `f` | Next fractal |
+| `Tab` / `f` | Next formula |
+| `d` / `J` | Parameter plane / Julia sets |
 | `p` | Next palette |
 | `m` | Glyph / half-block rendering |
 | `s` | Supersampling: 1× / 2× / 3× |
@@ -107,20 +109,30 @@ tail -f target/frascii.log      # ... in another terminal
 
 ### Fractals
 
-Six, cycled with `Tab`:
+Five formulas, cycled with `Tab`:
 
 | | iteration | |
 |---|---|---|
-| Mandelbrot | `z → z² + c` | the classic |
-| Julia | `z → z² + c` | `c` fixed, the sampled point is the seed; `o` walks it around a path |
+| quadratic | `z → z² + c` | the Mandelbrot set, and the classic Julia sets |
 | Burning Ship | `z → (\|Re z\| + i\|Im z\|)² + c` | the absolute values break the mirror symmetry, which is its whole look |
 | Tricorn | `z → conj(z)² + c` | three concave lobes |
 | Celtic | `z → \|Re(z²)\| + i·Im(z²) + c` | |
-| Multibrot³ | `z → z³ + c` | two-fold symmetry |
+| cubic | `z → z³ + c` | the degree-3 Multibrot; two-fold symmetry |
 
-Each frames its own set on arrival — they sit in different places on the plane, and the framings are measured from each set's bounding box rather than guessed. Magnification is relative to whichever fractal you are on, so every one reads 1× at its own home view.
+Each is drawn in either of **two planes**, swapped with `d`:
 
-Adding another is a `Formula` impl — the per-iteration step, its degree, and where its set lives — plus a `Fractal` that binds it. The escape loop, the bailout and the continuous escape count are shared, so a new kernel cannot drift from the others on any of them.
+- the **parameter plane**, where `z₀ = 0` and the sampled point is `c` — the Mandelbrot set and its analogues;
+- the **dynamical plane**, where `c` is fixed and the sampled point is the seed — that formula's Julia sets.
+
+So there are ten fractals, from two keys. Every formula has a Julia family, because the two planes are two readings of one iteration rather than two different fractals.
+
+`o` walks `c` around a closed loop per formula, morphing the shape indefinitely — this is the default motion, and the only one that never runs out of precision. The loops are **measured, not guessed**: each hugs that formula's connectedness locus, which is the band where Julia sets have filigree. It matters more than it sounds. The obvious choice — a circle — spends much of its cycle *outside* the locus, where the Julia set is Cantor dust and renders as a smooth featureless oval; the circle this replaced was at that dust baseline for 13 of 24 sampled phases.
+
+One consequence worth knowing, because it looks like a bug and is not: with `c` on the **real axis**, the Burning Ship and Tricorn Julia sets are *exactly* the quadratic's. Their `2|Re z||Im z|` and `−2·Re z·Im z` have the same magnitude as `2·Re z·Im z`, escape depends only on magnitude, so all three iterate identically. The Celtic escapes this because its absolute value is on the real part. The orbits therefore start 45° off the axis.
+
+Each fractal frames its own set on arrival — they sit in different places on the plane, and the framings are measured from each set's bounding box rather than guessed. Magnification is relative to whichever fractal you are on, so every one reads 1× at its own home view.
+
+Adding another is one `Formula` impl: the per-iteration step, its degree, where its set lives, and its Julia orbit. Both planes and the whole UI follow from that. The escape loop, the bailout and the continuous escape count are shared, so a new formula cannot drift from the others on any of them.
 
 `s` supersamples: each output pixel averages a `k × k` block of samples, which antialiases the boundary instead of snapping each cell to whichever sample landed at its centre. Colours are averaged *after* the palette and in linear light — averaging iteration counts and colouring once would give a boundary cell a colour belonging to neither side, and averaging sRGB bytes would make every mixed edge too dark.
 
@@ -132,9 +144,11 @@ It costs `k²` times the samples, measured at 1e6 magnification on a 20,000-pixe
 
 `c` drifts the colour mapping without touching the samples, so it costs one pass over an existing grid and no fractal maths at all — it composes with everything else.
 
-`o` walks the Julia parameter around a circle near the Mandelbrot boundary, which is the band where Julia sets have structure rather than being a filled disc or dust. It switches to Julia if you were on Mandelbrot, because orbiting a parameter the current fractal does not have would look like the key did nothing.
+`o` walks the Julia parameter around a closed loop measured for that formula — see [Fractals](#fractals) above for how the loops were chosen and why a circle is wrong. It flips to the Julia plane first if you were on a parameter plane, because orbiting a parameter the current fractal does not have would look like the key did nothing. This is the default motion, and the only one that never runs out of precision.
 
 `z` dives forever: descend toward the boundary, re-aim every eight-fold magnification, and on reaching the limit of `f64` reset to the whole set and pick somewhere new. It stops one notch *short* of the hard precision clamp — diving all the way would show several visibly mushy frames before every cut.
+
+> The dive's target rule has a known defect at depth: it looks for an escaped sample next to an *interior* one, but "interior" only means "did not escape within the current iteration limit", so several decades down it degenerates into a highest-iteration search and can wander into a near-empty view. It is tracked in [CLAUDE.md](CLAUDE.md#not-yet-designed). The orbit is the default drive partly because it has no equivalent failure.
 
 `[` and `]` set the pace, from about twenty minutes for a full descent down to thirty seconds; the default is two and a half. The step applies to the logarithm of the rate, because a dive's *duration* goes as `1 / ln(rate)` — stepping the rate itself would make each press imperceptible at the fast end and enormous at the slow one. The current pace shows in the status bar.
 
@@ -154,7 +168,7 @@ Three crates, with dependencies pointing one way only:
 
 | Crate | Responsibility |
 |-------|----------------|
-| `frascii-core` | Frontend-agnostic fractal logic: the kernels, the plane↔sample geometry, and the sampler that drives one over the other. No dependencies at all. |
+| `frascii-core` | Frontend-agnostic fractal logic: the kernels, the plane↔sample geometry, and the sampler that drives one over the other. Its only dependency is `rayon`, for row-parallel sampling. |
 | `frascii-tui` | The terminal frontend: the cell grid, glyph ramps and palettes, the ratatui blit, terminal lifecycle, key dispatch. |
 | `frascii` | The binary: argument parsing and wiring. |
 

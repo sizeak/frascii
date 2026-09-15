@@ -40,6 +40,35 @@ pub trait Formula {
 
     /// Half the width of a view that frames the whole set with a margin.
     const HOME_HALF_WIDTH: f64;
+
+    /// Half the width of a view that frames this formula's Julia sets.
+    ///
+    /// A Julia set lives in the *dynamical* plane, so it needs its own framing
+    /// and not [`HOME_HALF_WIDTH`](Formula::HOME_HALF_WIDTH), which frames the
+    /// parameter plane.
+    const JULIA_HALF_WIDTH: f64;
+
+    /// A closed loop of parameters whose Julia sets are worth watching.
+    ///
+    /// Every formula with a `c` has a Julia family, and animating `c` around a
+    /// loop is the one motion that changes the *shape* without ever running
+    /// out of precision. Which loop matters enormously, and the obvious choice
+    /// is wrong: a circle leaves the connectedness locus, and outside it the
+    /// Julia set is Cantor dust that renders as a smooth featureless blob. The
+    /// orbit this replaced was `0.7·(cos θ, sin θ)`, which spent **13 of 24
+    /// sampled phases** at dust.
+    ///
+    /// So these hug the locus boundary instead. Each point is the radius along
+    /// its ray — cast from `c = 0`, which is inside the main hyperbolic
+    /// component of all five formulas because `step(0, 0, 0) = (0, 0)` — whose
+    /// rendered Julia set carried the most structure, measured as the fraction
+    /// of adjacent glyph pairs that differ. On that scale the old orbit's dust
+    /// frames score 0.036 and Douady's rabbit 0.110; the weakest phase of
+    /// every loop here clears 0.046 and the means run 0.11–0.23.
+    ///
+    /// Interpolated linearly and wrapped, so the loop must be *closed*: the
+    /// last point joins the first, and a gap there would jerk once per cycle.
+    const JULIA_ORBIT: &'static [(f64, f64)];
 }
 
 /// `z → z² + c`: the Mandelbrot and Julia sets.
@@ -51,6 +80,23 @@ impl Formula for Quadratic {
     const DEGREE: f64 = 2.0;
     const HOME_CENTRE: (f64, f64) = (-0.75, 0.0);
     const HOME_HALF_WIDTH: f64 = 1.75;
+
+    const JULIA_HALF_WIDTH: f64 = 1.7;
+
+    #[rustfmt::skip]
+    const JULIA_ORBIT: &'static [(f64, f64)] = &[
+        (0.34652, 0.34652), (0.29574, 0.44261), (0.21704, 0.52398),
+        (0.12423, 0.62456), (0.00000, 0.62865), (-0.16320, 0.82048),
+        (-0.26083, 0.62969), (-0.38972, 0.58326), (-0.49978, 0.49978),
+        (-0.63703, 0.42565), (-0.68598, 0.28414), (-0.81356, 0.16183),
+        (-1.08460, 0.00000), (-0.81356, -0.16183), (-0.68598, -0.28414),
+        (-0.63703, -0.42565), (-0.49978, -0.49978), (-0.38972, -0.58326),
+        (-0.26083, -0.62969), (-0.16320, -0.82048), (-0.00000, -0.62865),
+        (0.12423, -0.62456), (0.21704, -0.52398), (0.29574, -0.44261),
+        (0.34652, -0.34652), (0.37229, -0.24876), (0.36311, -0.15040),
+        (0.34644, -0.06891), (0.23250, 0.00000), (0.34644, 0.06891),
+        (0.36311, 0.15040), (0.37229, 0.24876),
+    ];
 
     fn step(zr: f64, zi: f64, cr: f64, ci: f64) -> (f64, f64) {
         (zr * zr - zi * zi + cr, 2.0 * zr * zi + ci)
@@ -71,6 +117,23 @@ impl Formula for BurningShip {
     const HOME_CENTRE: (f64, f64) = (-0.51, -0.54);
     const HOME_HALF_WIDTH: f64 = 1.9;
 
+    const JULIA_HALF_WIDTH: f64 = 1.7;
+
+    #[rustfmt::skip]
+    const JULIA_ORBIT: &'static [(f64, f64)] = &[
+        (0.37993, 0.37993), (0.10200, 0.15266), (0.18087, 0.43665),
+        (0.06794, 0.34156), (0.00000, 0.26550), (-0.04963, 0.24951),
+        (-0.08897, 0.21480), (-0.13820, 0.20683), (-0.18293, 0.18293),
+        (-0.23165, 0.15478), (-0.29876, 0.12375), (-0.39074, 0.07772),
+        (-1.08460, 0.00000), (-1.29934, -0.25846), (-1.03770, -0.42983),
+        (-0.83438, -0.55751), (-0.66747, -0.66747), (-0.45329, -0.67840),
+        (-0.31923, -0.77070), (-0.18541, -0.93214), (-0.00000, -0.99997),
+        (0.21913, -1.10162), (0.44309, -1.06971), (0.71735, -1.07359),
+        (0.26384, -0.26384), (0.25233, -0.16860), (0.23947, -0.09919),
+        (0.24885, -0.04950), (0.23250, 0.00000), (0.31777, 0.06321),
+        (0.39988, 0.16563), (0.17461, 0.11667),
+    ];
+
     fn step(zr: f64, zi: f64, cr: f64, ci: f64) -> (f64, f64) {
         (zr * zr - zi * zi + cr, 2.0 * zr.abs() * zi.abs() + ci)
     }
@@ -85,6 +148,23 @@ impl Formula for Tricorn {
     const DEGREE: f64 = 2.0;
     const HOME_CENTRE: (f64, f64) = (-0.56, 0.0);
     const HOME_HALF_WIDTH: f64 = 1.9;
+
+    const JULIA_HALF_WIDTH: f64 = 1.7;
+
+    #[rustfmt::skip]
+    const JULIA_ORBIT: &'static [(f64, f64)] = &[
+        (0.25456, 0.25456), (0.32362, 0.48433), (0.17600, 0.42489),
+        (0.06794, 0.34156), (0.00000, 0.28320), (-0.04808, 0.24171),
+        (-0.08610, 0.20787), (-0.12500, 0.18708), (-0.18201, 0.18201),
+        (-0.23165, 0.15478), (-0.24621, 0.10199), (-0.40499, 0.08056),
+        (-1.08460, 0.00000), (-0.40499, -0.08056), (-0.24621, -0.10199),
+        (-0.23165, -0.15478), (-0.18201, -0.18201), (-0.12500, -0.18708),
+        (-0.08610, -0.20787), (-0.04808, -0.24171), (-0.00000, -0.28320),
+        (0.06794, -0.34156), (0.17600, -0.42489), (0.32362, -0.48433),
+        (0.25456, -0.25456), (0.25233, -0.16860), (0.24820, -0.10281),
+        (0.24885, -0.04950), (0.23250, 0.00000), (0.24885, 0.04950),
+        (0.24820, 0.10281), (0.25233, 0.16860),
+    ];
 
     fn step(zr: f64, zi: f64, cr: f64, ci: f64) -> (f64, f64) {
         // Conjugating flips the sign of the cross term only.
@@ -101,6 +181,23 @@ impl Formula for Celtic {
     const DEGREE: f64 = 2.0;
     const HOME_CENTRE: (f64, f64) = (-0.84, 0.0);
     const HOME_HALF_WIDTH: f64 = 1.95;
+
+    const JULIA_HALF_WIDTH: f64 = 1.95;
+
+    #[rustfmt::skip]
+    const JULIA_ORBIT: &'static [(f64, f64)] = &[
+        (0.18187, 0.18187), (0.13682, 0.20476), (0.09377, 0.22637),
+        (0.05099, 0.25634), (0.00000, 0.28859), (-0.06692, 0.33644),
+        (-0.17801, 0.42975), (-0.70695, 1.05803), (-0.73177, 0.73177),
+        (-0.73576, 0.49162), (-0.66566, 0.27572), (-1.15061, 0.22887),
+        (-1.38985, 0.00000), (-1.17893, -0.23450), (-0.66566, -0.27572),
+        (-0.75079, -0.50166), (-0.73924, -0.73924), (-0.69522, -1.04047),
+        (-0.17801, -0.42975), (-0.06692, -0.33644), (-0.00000, -0.28859),
+        (0.05099, -0.25634), (0.09377, -0.22637), (0.13682, -0.20476),
+        (0.18187, -0.18187), (0.23206, -0.15506), (0.29680, -0.12294),
+        (0.30100, -0.05987), (0.06435, 0.00000), (0.30100, 0.05987),
+        (0.29680, 0.12294), (0.23206, 0.15506),
+    ];
 
     fn step(zr: f64, zi: f64, cr: f64, ci: f64) -> (f64, f64) {
         ((zr * zr - zi * zi).abs() + cr, 2.0 * zr * zi + ci)
@@ -119,6 +216,23 @@ impl Formula for Cubic {
     const DEGREE: f64 = 3.0;
     const HOME_CENTRE: (f64, f64) = (0.03, 0.0);
     const HOME_HALF_WIDTH: f64 = 1.6;
+
+    const JULIA_HALF_WIDTH: f64 = 1.4;
+
+    #[rustfmt::skip]
+    const JULIA_ORBIT: &'static [(f64, f64)] = &[
+        (0.58819, 0.58819), (0.41128, 0.61552), (0.28786, 0.69496),
+        (0.21811, 1.09652), (0.00000, 1.08256), (-0.21811, 1.09652),
+        (-0.28786, 0.69496), (-0.41128, 0.61552), (-0.58819, 0.58819),
+        (-0.54934, 0.36705), (-0.57473, 0.23806), (-0.50746, 0.10094),
+        (-0.34560, 0.00000), (-0.50746, -0.10094), (-0.57473, -0.23806),
+        (-0.54934, -0.36705), (-0.58819, -0.58819), (-0.41128, -0.61552),
+        (-0.28786, -0.69496), (-0.21811, -1.09652), (-0.00000, -1.08256),
+        (0.21811, -1.09652), (0.28786, -0.69496), (0.41128, -0.61552),
+        (0.58819, -0.58819), (0.54934, -0.36705), (0.57473, -0.23806),
+        (0.50746, -0.10094), (0.34560, 0.00000), (0.50746, 0.10094),
+        (0.57473, 0.23806), (0.54934, 0.36705),
+    ];
 
     fn step(zr: f64, zi: f64, cr: f64, ci: f64) -> (f64, f64) {
         // (a+bi)³ = a³ - 3ab² + (3a²b - b³)i

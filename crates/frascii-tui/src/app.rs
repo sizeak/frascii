@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use frascii_core::{
-    Complex, Kernel, Precision, SampleGrid, Viewport, boundary_target, is_interesting,
+    FormulaKind, Kernel, Precision, SampleGrid, Viewport, boundary_target, is_interesting,
 };
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -97,12 +97,13 @@ const CYCLE_RATE: f64 = 6.0;
 /// How long the Julia parameter takes to travel once around its path.
 const ORBIT_PERIOD: Duration = Duration::from_secs(24);
 
-/// The radius of the Julia parameter's path.
-///
-/// Chosen to stay near the Mandelbrot set's boundary, which is where Julia sets
-/// are interesting: well inside and they are a filled disc, well outside and
-/// they are dust.
-const ORBIT_RADIUS: f64 = 0.7;
+// The path itself lives in core, per formula, as `Formula::JULIA_ORBIT` — it
+// is measured data about where Julia sets have structure, not a frontend
+// choice. What used to be here was a radius: `c = 0.7·(cos θ, sin θ)`, a circle
+// about the origin. Over half of that circle lies *outside* the Mandelbrot set,
+// where the Julia set is Cantor dust and renders as a smooth featureless oval —
+// 13 of 24 sampled phases measured at the dust baseline. A circle is the wrong
+// shape for every formula here, because none of these sets is a disc.
 
 /// How fast the auto-zoom descends by default, as magnification per second.
 ///
@@ -242,7 +243,10 @@ impl App {
                     }
                     .sample_aspect(CELL_ASPECT),
                 ),
-                kernel: Kernel::default(),
+                // A Julia set rather than the Mandelbrot, because the default
+                // motion is the orbit and the orbit needs a live `c`. The
+                // Mandelbrot is one `d` away, and the status bar says so.
+                kernel: Kernel::julia_of(FormulaKind::default()),
                 limit: 0,
             },
             sampled_for: None,
@@ -262,14 +266,27 @@ impl App {
             //
             // Cycling alone is not enough, and that distinction is the point:
             // it moves the *colour* while the shape stands still, which reads
-            // as a tinted photograph rather than a live render. The dive is
-            // what makes the geometry move.
+            // as a tinted photograph rather than a live render.
             //
-            // Touching any navigation key stops the dive — see `take_control`
-            // — so this costs an explorer one keypress and gives everyone else
-            // the thing the program is for.
+            // The *orbit* is the default drive rather than the dive, and that
+            // is a considered swap. Both move the geometry, but they fail
+            // differently. The orbit walks a measured loop and so never leaves
+            // the region it was measured in: it cannot run out of precision,
+            // never needs to re-aim, and runs indefinitely. The dive descends
+            // into `f64`'s limit in a couple of minutes, has to re-target
+            // every few decades or it lands in solid interior (measured at 898
+            // blank frames out of 1200 before `RETARGET_EVERY` existed), and
+            // its target rule is known to pick badly at depth — a boundary
+            // sample adjacent to an *apparently* interior one, where "interior"
+            // only means "did not escape within the current limit". So the dive
+            // is the one that needs watching and the orbit is the one that can
+            // be left alone. `z` still starts the dive.
+            //
+            // Touching any navigation key stops whichever is running — see
+            // `take_control` — so this costs an explorer one keypress and gives
+            // everyone else the thing the program is for.
             cycling: true,
-            drive: Drive::AutoZoom,
+            drive: Drive::JuliaOrbit,
             orbit_turns: 0.0,
             dive_rate: DIVE_RATE_DEFAULT,
             dived_from: 1.0,
@@ -279,6 +296,20 @@ impl App {
         // one whose home `Viewport::home` happens to use.
         app.frame_home();
         app
+    }
+
+    /// Pin the app to a fixed, motionless Mandelbrot for snapshot tests.
+    ///
+    /// Snapshots must depend on the *rendering*, not on which defaults happen
+    /// to ship — otherwise changing the launch view rewrites every snapshot and
+    /// a real geometry regression hides in the noise. Exactly that happened
+    /// when the default drive became the orbit.
+    #[cfg(test)]
+    pub(crate) fn pin_for_snapshot(&mut self) {
+        self.params.kernel = Kernel::MANDELBROT;
+        self.drive = Drive::Still;
+        self.cycling = false;
+        self.frame_home();
     }
 
     /// The palette currently in use, for a status line.
@@ -350,6 +381,11 @@ impl App {
 
             (KeyCode::Char('r' | 'R'), _) => self.navigate(App::reset),
             (KeyCode::Tab | KeyCode::Char('f'), _) => self.next_kernel(),
+            // `d` for the *dynamical* plane, which is the actual name for
+            // where Julia sets live as against the parameter plane. `J` too,
+            // because "Julia" is what a user will look for. Not `j`: that is
+            // pan-down, and hjkl outranks a mnemonic.
+            (KeyCode::Char('d' | 'J'), _) => self.flip_plane(),
             (KeyCode::Char('p' | 'P'), _) => self.next_palette(),
             (KeyCode::Char('m' | 'M'), _) => self.next_mode(),
             (KeyCode::Char('s' | 'S'), _) => self.next_supersample(),
@@ -436,9 +472,28 @@ impl App {
         self.params.viewport.frame(centre, half_width);
     }
 
-    /// Switch to the next fractal.
+    /// Swap between this formula's parameter plane and its Julia sets.
+    ///
+    /// The two planes are two readings of one iteration, so this is a *view*
+    /// change rather than a different fractal — which is why it is its own key
+    /// instead of ten entries in the `f` cycle.
+    fn flip_plane(&mut self) {
+        self.params.kernel = self.params.kernel.flip_plane();
+        if self.drive == Drive::JuliaOrbit && !self.params.kernel.is_julia() {
+            // Otherwise the next `advance` would put the Julia straight back
+            // and the key would appear not to work: the orbit owns `kernel`
+            // while it runs, so leaving the Julia plane has to stop it.
+            self.drive = Drive::Still;
+        }
+        // Home, for the same reason as a formula switch: the two planes are
+        // unrelated regions, and a Julia set at a parameter plane's deep zoom
+        // is a blank screen.
+        self.reset();
+    }
+
+    /// Switch to the next formula, staying in the same plane.
     fn next_kernel(&mut self) {
-        self.params.kernel = self.params.kernel.next();
+        self.params.kernel = self.params.kernel.next_formula();
         // Home, because a view framed on one fractal says nothing about where
         // the next one is interesting — and a Julia set at a Mandelbrot's deep
         // zoom is usually a blank screen.
@@ -464,8 +519,11 @@ impl App {
             drive
         };
 
-        if self.drive == Drive::JuliaOrbit && !self.params.kernel.same_kind(julia_at(0.0)) {
-            self.params.kernel = julia_at(self.orbit_turns);
+        if self.drive == Drive::JuliaOrbit && !self.params.kernel.is_julia() {
+            // A parameter plane has no `c` to move, so orbiting there would
+            // look like the key did nothing. Flip to this formula's own Julia
+            // family rather than to a hardcoded quadratic one.
+            self.params.kernel = julia_at(self.params.kernel.formula(), self.orbit_turns);
             self.reset();
         }
     }
@@ -496,7 +554,7 @@ impl App {
             Drive::JuliaOrbit => {
                 self.orbit_turns =
                     (self.orbit_turns + seconds / ORBIT_PERIOD.as_secs_f64()).fract();
-                self.params.kernel = julia_at(self.orbit_turns);
+                self.params.kernel = julia_at(self.params.kernel.formula(), self.orbit_turns);
             }
             Drive::AutoZoom => self.dive(seconds),
         }
@@ -800,7 +858,26 @@ impl App {
             // held key repeats faster than the frame rate, and handling one
             // event per draw would run the renderer at the key-repeat rate
             // instead of the frame rate.
-            while let Some(remaining) = next_frame.checked_duration_since(Instant::now()) {
+            loop {
+                // `saturating_duration_since`, never `checked_duration_since`.
+                // The deadline is already in the past on any frame that
+                // overran, so the checked form yields `None` and skips the
+                // body — which holds the only `event::poll` in the program.
+                // Every overrunning frame then handled no input at all, and
+                // under *sustained* overrun the renderer went permanently
+                // deaf: raw mode clears ISIG, so Ctrl-C is just a key event
+                // and died with the rest. Measured on a pty at 300x100 with
+                // 3x supersampling on the default dive — 40s in, `q` was
+                // ignored for the 15s the harness waited, the alternate
+                // screen was never left, and it took a SIGKILL, which skips
+                // the restore hook and leaves the user's shell in raw mode.
+                //
+                // Saturating to zero keeps the drain: a zero duration makes
+                // `poll` "return immediately with an `Event` availability
+                // information" (`crossterm-0.29.0 src/event.rs:185-187`), so
+                // an overrunning frame still services whatever is queued and
+                // still terminates once the queue is empty.
+                let remaining = next_frame.saturating_duration_since(Instant::now());
                 // The short-circuit is load-bearing: `read` blocks, so it must
                 // only be reached once `poll` has said an event is waiting.
                 if !event::poll(remaining)? {
@@ -824,9 +901,9 @@ impl App {
 /// complete, useful set, and the shortest still points at the full list.
 fn hints_for(width: usize) -> &'static str {
     const TIERS: &[&str] = &[
-        "hjkl pan  +/- zoom  z dive  p palette  m mode  s ss  ? help",
-        "hjkl  +/-  z dive  p palette  ? help",
-        "hjkl  +/-  z  p  ? help",
+        "hjkl pan  +/- zoom  f formula  d plane  z dive  p palette  ? help",
+        "hjkl  +/-  f formula  d plane  p palette  ? help",
+        "hjkl  +/-  f  d  z  p  ? help",
         "? help",
     ];
     TIERS
@@ -852,7 +929,8 @@ fn help_overlay() -> Paragraph<'static> {
         row("+ / -", "zoom in / out"),
         row(". / ,", "iteration limit"),
         row("r", "reset the view"),
-        row("Tab / f", "next fractal"),
+        row("Tab / f", "next formula"),
+        row("d / J", "parameter / Julia plane"),
         row("p", "next palette"),
         row("m", "glyph / half-block"),
         row("s", "supersampling 1x/2x/3x"),
@@ -888,16 +966,14 @@ fn centred(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-/// The Julia parameter at a point on its circular path.
+/// The Julia kernel for `formula` at `turns` around *its own* measured loop.
 ///
-/// A circle near the Mandelbrot boundary rather than an arbitrary sweep: that
-/// is the band where Julia sets have structure, so the whole orbit is worth
-/// watching instead of just the part that crosses it.
-fn julia_at(turns: f64) -> Kernel {
-    let theta = turns * std::f64::consts::TAU;
-    Kernel::Julia {
-        c: Complex::new(ORBIT_RADIUS * theta.cos(), ORBIT_RADIUS * theta.sin()),
-    }
+/// Per formula rather than one shared path, which is the whole point: a `c`
+/// measured for the quadratic is an arbitrary parameter of the burning ship,
+/// and usually outside its locus — a featureless blob. Each formula carries the
+/// loop measured for it.
+fn julia_at(formula: FormulaKind, turns: f64) -> Kernel {
+    Kernel::Julia(formula, formula.julia_parameter(turns))
 }
 
 impl Default for App {
@@ -1240,9 +1316,13 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_the_fractal_and_reframes() {
+    fn tab_cycles_the_formula_and_keeps_the_plane() {
+        // Tab changes the *formula* and leaves the plane alone, so a user
+        // watching Julia sets keeps watching Julia sets. `d` is what changes
+        // plane.
         let mut app = updated(60, 20);
-        assert_eq!(app.kernel_name(), "mandelbrot");
+        let _ = app.handle_key(press(KeyCode::Char('d')));
+        assert_eq!(app.kernel_name(), "mandelbrot", "d leaves the julia plane");
 
         // Zoom somewhere first: a view framed on one fractal says nothing about
         // where the next is interesting, so switching must reframe.
@@ -1250,8 +1330,8 @@ mod tests {
             let _ = app.handle_key(press(KeyCode::Char('+')));
         }
         let _ = app.handle_key(press(KeyCode::Tab));
-        assert_eq!(app.kernel_name(), "julia");
-        // Re-framed onto Julia's own home, so the magnification reads 1 —
+        assert_eq!(app.kernel_name(), "burning ship");
+        // Re-framed onto that set's own home, so the magnification reads 1 —
         // not 1.03, which is what a shared reference width would have given.
         assert!(
             (app.params.viewport.magnification() - 1.0).abs() < 1e-12,
@@ -1260,19 +1340,29 @@ mod tests {
         );
 
         let _ = app.handle_key(press(KeyCode::Tab));
-        assert_eq!(app.kernel_name(), "burning ship");
+        assert_eq!(app.kernel_name(), "tricorn");
     }
 
     #[test]
     fn every_kernel_is_reachable_and_frames_itself() {
-        // Tab cycles all six, and each arrives framed on its own set rather
-        // than on the previous one's view.
+        // Ten fractals from two keys: `f` cycles the five formulas and `d`
+        // flips the plane. Each arrives framed on its own set rather than on
+        // the previous one's view.
         let area = Rect::new(0, 0, 60, 24);
         let mut app = updated(60, 24);
+        // Start from the parameter plane so the walk below covers both.
+        let _ = app.handle_key(press(KeyCode::Char('d')));
+        app.update(area, Instant::now());
         let mut seen = vec![app.kernel_name()];
 
-        for _ in 1..6 {
-            let _ = app.handle_key(press(KeyCode::Tab));
+        for step in 1..10 {
+            // Five formulas on the parameter plane, then flip and do the five
+            // Julia families.
+            if step == 5 {
+                let _ = app.handle_key(press(KeyCode::Char('d')));
+            } else {
+                let _ = app.handle_key(press(KeyCode::Tab));
+            }
             app.update(area, Instant::now());
             seen.push(app.kernel_name());
 
@@ -1299,17 +1389,22 @@ mod tests {
             seen,
             vec![
                 "mandelbrot",
-                "julia",
                 "burning ship",
                 "tricorn",
                 "celtic",
-                "multibrot³"
+                "multibrot³",
+                // `d` here: the same formula, seen in its dynamical plane.
+                "cubic julia",
+                "julia",
+                "burning ship julia",
+                "tricorn julia",
+                "celtic julia",
             ]
         );
 
-        // And it wraps.
+        // And the formula cycle wraps.
         let _ = app.handle_key(press(KeyCode::Tab));
-        assert_eq!(app.kernel_name(), "mandelbrot");
+        assert_eq!(app.kernel_name(), "cubic julia");
     }
 
     #[test]
@@ -1488,7 +1583,7 @@ mod tests {
     fn the_status_bar_shows_the_state_and_the_controls() {
         let app = updated(100, 20);
         let state = app.state_text();
-        assert!(state.contains("mandelbrot"), "{state}");
+        assert!(state.contains("julia"), "{state}");
         assert!(state.contains("glyph"), "{state}");
         assert!(state.contains("iter"), "{state}");
         // And the hints are there when there is room.
@@ -1538,8 +1633,12 @@ mod tests {
         assert_eq!(app.motion_text(), "", "nothing is moving");
 
         let mut live = launched(30, 10);
-        // The dive rate rides along while diving, so the pace is visible.
-        assert_eq!(live.motion_text(), "auto-zoom 1.20x/s cycling");
+        // The orbit is the shipped drive, so that is what a fresh launch says.
+        assert_eq!(live.motion_text(), "orbit cycling");
+        // And the dive rate rides along while diving, so the pace is visible.
+        let mut diving = launched(30, 10);
+        let _ = diving.handle_key(press(KeyCode::Char('z')));
+        assert_eq!(diving.motion_text(), "auto-zoom 1.20x/s cycling");
         let _ = live.handle_key(press(KeyCode::Char(' ')));
         assert!(live.motion_text().starts_with("paused"));
     }
@@ -1752,15 +1851,21 @@ mod tests {
     }
 
     #[test]
-    fn the_julia_orbit_moves_the_parameter_and_switches_fractal() {
+    fn the_julia_orbit_moves_the_parameter_and_switches_plane() {
         // Orbiting a parameter the current fractal does not have would look
-        // like the key did nothing, so `o` switches to Julia too.
+        // like the key did nothing, so `o` flips to the Julia plane too — and
+        // to *this formula's* Julia family, not a hardcoded quadratic one.
         let area = Rect::new(0, 0, 40, 14);
         let mut app = updated(40, 14);
-        assert_eq!(app.kernel_name(), "mandelbrot");
+        // Step onto a parameter plane of a non-quadratic formula first, so a
+        // hardcoded quadratic Julia would be visible in the name below.
+        let _ = app.handle_key(press(KeyCode::Char('d')));
+        let _ = app.handle_key(press(KeyCode::Tab));
+        assert_eq!(app.kernel_name(), "burning ship");
+        assert_eq!(app.drive, Drive::Still, "d off the julia plane stops it");
 
         let _ = app.handle_key(press(KeyCode::Char('o')));
-        assert_eq!(app.kernel_name(), "julia");
+        assert_eq!(app.kernel_name(), "burning ship julia");
         assert_eq!(app.drive, Drive::JuliaOrbit);
 
         let first = app.params.kernel;
@@ -1770,25 +1875,98 @@ mod tests {
     }
 
     #[test]
+    fn d_and_shift_j_both_flip_the_plane() {
+        // Two bindings for one action, like `Tab`/`f` and `+`/`=`: `d` is the
+        // dynamical plane's proper name and `J` is what someone looking for
+        // "Julia" will try. `j` is deliberately not one of them — it pans.
+        for code in [KeyCode::Char('d'), KeyCode::Char('J')] {
+            let mut app = updated(40, 14);
+            assert!(app.params.kernel.is_julia(), "launch is a julia");
+            let _ = app.handle_key(press(code));
+            assert_eq!(app.kernel_name(), "mandelbrot", "{code:?} did not flip");
+            let _ = app.handle_key(press(code));
+            assert_eq!(app.kernel_name(), "julia", "{code:?} is not reversible");
+        }
+        // And lowercase `j` still pans rather than flipping.
+        let mut app = updated(40, 14);
+        let before = app.params.viewport.centre;
+        let _ = app.handle_key(press(KeyCode::Char('j')));
+        assert!(app.params.kernel.is_julia(), "j flipped the plane");
+        assert_ne!(app.params.viewport.centre, before, "j did not pan");
+    }
+
+    #[test]
+    fn every_formula_orbits_its_own_parameter_loop() {
+        // The feature this all exists for: the orbit is not quadratic-only. For
+        // each of the five formulas, running the orbit must move `c` along that
+        // formula's own loop and keep rendering something with structure.
+        let area = Rect::new(0, 0, 40, 16);
+        for step in 0..5 {
+            let mut app = updated(40, 16);
+            for _ in 0..step {
+                let _ = app.handle_key(press(KeyCode::Tab));
+            }
+            let _ = app.handle_key(press(KeyCode::Char('o')));
+            app.update(area, Instant::now());
+            assert!(app.params.kernel.is_julia(), "{step} did not reach a julia");
+            let name = app.kernel_name();
+
+            let first = app.params.kernel;
+            animate(&mut app, area, 40, Duration::from_millis(200));
+            assert_ne!(app.params.kernel, first, "{name} parameter did not move");
+            assert!(app.params.kernel.same_kind(first), "{name} left its plane");
+
+            // Still a picture, not a blob: the loops were measured for this.
+            let glyphs: std::collections::BTreeSet<char> =
+                app.cells.cells().map(|c| c.glyph).collect();
+            assert!(
+                glyphs.len() >= 4,
+                "{name} rendered {} distinct glyphs mid-orbit",
+                glyphs.len()
+            );
+        }
+    }
+
+    #[test]
+    fn leaving_the_julia_plane_stops_the_orbit() {
+        // The orbit owns `kernel` while it runs, so without this the next
+        // `advance` would put the Julia straight back and `d` would look broken.
+        let mut app = launched(30, 12);
+        assert_eq!(app.drive, Drive::JuliaOrbit);
+        let _ = app.handle_key(press(KeyCode::Char('d')));
+        assert_eq!(app.drive, Drive::Still, "the orbit kept running");
+        assert!(!app.params.kernel.is_julia());
+
+        // Driving on must leave it on the parameter plane.
+        let area = Rect::new(0, 0, 30, 12);
+        animate(&mut app, area, 10, Duration::from_millis(100));
+        assert!(!app.params.kernel.is_julia(), "the orbit pulled it back");
+    }
+
+    #[test]
     fn the_orbit_stays_on_its_path_forever() {
-        // The path is a circle near the Mandelbrot boundary, which is the band
-        // where Julia sets have structure. Drifting off it — through
+        // The path is a measured loop hugging the connectedness locus, which is
+        // the band where Julia sets have structure. Drifting off it — through
         // accumulated error, or a `fract` that was forgotten — would end in
-        // dust or a filled disc.
+        // dust. It is no longer a circle, so this checks membership of the loop
+        // rather than a constant radius: after fifty laps the parameter must be
+        // exactly what turn `orbit_turns` of the formula's own loop gives.
         let area = Rect::new(0, 0, 24, 8);
         let mut app = updated(24, 8);
         let _ = app.handle_key(press(KeyCode::Char('o')));
         // Fifty laps.
         animate(&mut app, area, 1_200, Duration::from_secs(1));
 
-        let Kernel::Julia { c } = app.params.kernel else {
+        let Kernel::Julia(formula, c) = app.params.kernel else {
             panic!("left julia");
         };
-        let radius = c.norm_sqr().sqrt();
-        assert!(
-            (radius - ORBIT_RADIUS).abs() < 1e-9,
-            "drifted off the path: radius {radius}"
+        assert_eq!(
+            c,
+            formula.julia_parameter(app.orbit_turns),
+            "drifted off the measured loop"
         );
+        // And the phase is wrapped, so it cannot grow until the increment
+        // stops registering against it.
         assert!(app.orbit_turns >= 0.0 && app.orbit_turns < 1.0);
     }
 
@@ -1891,7 +2069,11 @@ mod tests {
         // An orbit reframes home on every parameter change while a dive is
         // descending, so running both would produce neither.
         let mut app = launched(30, 10);
-        assert_eq!(app.drive, Drive::AutoZoom, "the shipped default");
+        assert_eq!(app.drive, Drive::JuliaOrbit, "the shipped default");
+        let _ = app.handle_key(press(KeyCode::Char('z')));
+        assert_eq!(app.drive, Drive::AutoZoom, "z must replace the orbit");
+        let _ = app.handle_key(press(KeyCode::Char('z')));
+        assert_eq!(app.drive, Drive::Still, "a second press must turn it off");
         let _ = app.handle_key(press(KeyCode::Char('o')));
         assert_eq!(app.drive, Drive::JuliaOrbit);
         let _ = app.handle_key(press(KeyCode::Char('o')));
@@ -1903,6 +2085,7 @@ mod tests {
         // It changes only the shader, so it can run during a dive.
         let area = Rect::new(0, 0, 30, 10);
         let mut app = launched(30, 10);
+        let _ = app.handle_key(press(KeyCode::Char('z')));
         animate(&mut app, area, 20, Duration::from_millis(50));
         assert!(app.cycling && app.drive == Drive::AutoZoom);
         assert!(app.shader.phase > 0.0, "the palette stopped cycling");
@@ -1974,21 +2157,33 @@ mod tests {
         // What the user actually gets, and the reason the defaults are what
         // they are: cycling alone moves the colour while the geometry stands
         // still, which reads as a tinted photograph rather than a live render.
+        //
+        // The shipped drive is the orbit, so the shape changes by *morphing* at
+        // a fixed scale rather than by descending. That is the stronger version
+        // of this property: the glyphs must change while the magnification does
+        // not, which no amount of palette cycling could fake.
         let area = Rect::new(0, 0, 50, 18);
         let mut app = launched(50, 18);
         assert!(app.cycling, "colour should drift");
-        assert_eq!(app.drive, Drive::AutoZoom, "the shape should move");
+        assert_eq!(app.drive, Drive::JuliaOrbit, "the shape should move");
 
         let magnification = app.magnification();
         let glyphs: Vec<char> = app.cells.cells().map(|c| c.glyph).collect();
         animate(&mut app, area, 20, Duration::from_millis(50));
 
-        assert!(
-            app.magnification() > magnification,
-            "the view did not descend"
-        );
         let after: Vec<char> = app.cells.cells().map(|c| c.glyph).collect();
         assert_ne!(glyphs, after, "the shape did not change, only the colour");
+        assert!(
+            (app.magnification() - magnification).abs() < 1e-9,
+            "the orbit should morph at a fixed scale, not zoom"
+        );
+        // And the dive is still one keypress away, doing what it always did.
+        let _ = app.handle_key(press(KeyCode::Char('z')));
+        animate(&mut app, area, 20, Duration::from_millis(50));
+        assert!(
+            app.magnification() > magnification,
+            "the dive did not descend"
+        );
     }
 
     #[test]
@@ -2006,6 +2201,7 @@ mod tests {
             KeyCode::Char('r'),
         ] {
             let mut app = launched(30, 12);
+            let _ = app.handle_key(press(KeyCode::Char('z')));
             assert_eq!(app.drive, Drive::AutoZoom);
             let _ = app.handle_key(press(code));
             assert_eq!(app.drive, Drive::Still, "{code:?} did not take control");

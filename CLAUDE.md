@@ -4,7 +4,7 @@ Guidance for Claude Code (claude.ai/code) working in this repository. `AGENTS.md
 
 frascii is a terminal ASCII-art renderer for realtime fractals: a live, colourful ASCII rendering of escape-time fractals (Mandelbrot, Julia, and others) drawn in a terminal window.
 
-**Status: bootstrap.** The workspace, the task runner and the crate boundaries are in place. The fractal kernels and the rendering pipeline are *not designed yet* — see [Not yet designed](#not-yet-designed), which names every deferred decision and which crate owns it. Do not fill a gap in by inference; the design pass is separate work.
+**Status: it runs.** Five formulas, each in two planes — parameter and dynamical — for ten fractals; glyph and half-block rendering, nine palettes, supersampling, pan and zoom, a parameter orbit and an unattended dive. What is deliberately absent is listed in [Not yet designed](#not-yet-designed), which names each deferred decision and which crate owns it. Do not fill one in by inference; that is separate work.
 
 ## Commands
 
@@ -14,7 +14,7 @@ Everything goes through cargo. The task runner is `xtask`, an ordinary workspace
 cargo verify              every lane: fmt, clippy, build, test, doc
 cargo verify --only doc   one lane (each CI job runs exactly this)
 cargo verify --list       the lane / exit-code table
-cargo test -p frascii-tui smooth     one crate, one filter — plain cargo
+cargo test -p frascii-core smooth    one crate, one filter — plain cargo
 cargo run                            the TUI (the default binary)
 cargo run --release                  ... release profile (see Performance)
 cargo run -- --log target/frascii.log -vv               ... with logging
@@ -54,7 +54,7 @@ For every bug fix or behaviour change: (1) write a failing test that reproduces 
 ## Architecture
 
 ```
-frascii-core      frontend-agnostic fractal logic; zero dependencies
+frascii-core      frontend-agnostic fractal logic; `rayon` only
        ^
 frascii-tui       the terminal frontend: rendering + ratatui + key dispatch
        ^
@@ -63,7 +63,7 @@ frascii           the binary: clap + wiring
 
 Plus `xtask`, the task runner, which is not part of the product.
 
-**`frascii-core` is the boundary that matters.** It is what a second frontend — an image exporter, a GPU surface — would consume *unchanged*, so nothing presentational and nothing host-bound may drift into it: no colour, no glyph ramp, no terminal, no `std::io`. Its `[dependencies]` block is empty and is the whole check. The test for new code is: *would a second frontend need this unchanged?*
+**`frascii-core` is the boundary that matters.** It is what a second frontend — an image exporter, a GPU surface — would consume *unchanged*, so nothing presentational and nothing host-bound may drift into it: no colour, no glyph ramp, no terminal, no `std::io`. Its only dependency is `rayon`, for row-parallel sampling — a parallelism crate names no host and no presentation, which is the line that matters. (This file used to say the block was empty "and is the whole check"; it has not been empty since the sampler landed, so a reader running that check would have found it failing.) The test for new code is: *would a second frontend need this unchanged?*
 
 Two senses of "grid", because conflating them is what pulls presentation downward: a **sample grid** of `Escape` values is core's output and frontend-agnostic; a **cell grid** of glyphs and colours is presentation. Likewise the plane↔sample geometry belongs in core with the pixel aspect ratio as an *input* (≈2.0 for a terminal cell, 1.0 for a square pixel) — that number is the frontend's, the geometry is not.
 
@@ -90,6 +90,10 @@ Named so nobody has to guess whether it was forgotten.
 
 In **`frascii-core`**:
 
+- **a `boundary_target` that does not degenerate at depth.** The live defect described above: the rule wants an escaped sample adjacent to an *interior* one, but `Escape::Interior` means "did not escape within this limit", so several decades down every "interior" neighbour of the chosen target escapes at a higher limit and the rule becomes a highest-iteration search — which biases *toward* false neighbours, since those sit nearest the limit. Measured collapsing below `MIN_INTERESTING` on the burning ship at 50×25 (1.34e8×) and 200×50 (5.50e11×), and on the mandelbrot at 80×40 (6.87e10×); the existing dive test passes only because 50×25 mandelbrot is a lucky trajectory, so **make that test parametric over several lattices** when fixing it. Candidate rules: spot-check a candidate's interior neighbour at a much higher limit (few candidates, so it is cheap), score by *how many* interior neighbours it has rather than by iteration count, or require the interior side to be a 2×2 block. Until then the orbit is the default drive and `z` carries the caveat
+- **`home()` returning a half-height as well as a half-width.** It gives only a half-width, and the height follows from the terminal's aspect — so the cubic (half-extents 0.688 × 1.268, taller than it is wide), the celtic and the tricorn are clipped top and bottom at every ordinary terminal shape. `every_formula_frames_a_set_worth_looking_at` cannot see it: it asserts an interior *fraction*, not containment. The fix is one `max` at the call site but it changes the signature
+- **reconciling the clamp with `precision()`.** `Precision::Exhausted` is reachable by zooming for ~4% of realistic (cols, centre) pairs with |centre| > 1 — e.g. cols=80, |centre|=1.7499 gives a ratio of 15.999999999999998 against a `>= 16.0` test — which contradicts the invariant stated below. The two expressions agree symbolically and not numerically; one should derive from the other
+
 - fractals that do not fit the escape-time shape at all — Newton's method classifies by *which root* an orbit converges to, so `Escape` does not describe it and it would need its own result type
 - Phoenix and other formulas needing the previous `z`, which the current `Formula::step` signature does not carry
 
@@ -98,7 +102,6 @@ In **`frascii-tui`** — presentation and dispatch:
 - braille or octant modes, if ever. They reach 2×4 sub-samples but carry **one colour per cell**, which is useless for a colour-mapped fractal — 1×2 half-block is the ceiling for coloured sub-cell rendering, so this is a "probably never" rather than a "not yet"
 - zoom about the cursor, which needs mouse capture. Not merely unwired: `EnableMouseCapture` turns on all-motion reporting that has to be coalesced, and it must be disabled in the teardown **and** the panic hook or a crash leaves the user's shell eating escape codes
 - periodicity checking in the kernels, which is the next real optimisation if one is ever needed. It outranks SIMD for deep views, where the cardioid shortcut catches nothing. Needs a false-positive property test first: too loose an epsilon paints exterior as interior, which looks exactly like a kernel bug
-- the camera and animation clock's *keybindings* (the camera's own maths is core's). The clock should be `Instant`-based: an earlier tick counter incremented only on idle polls, so any keypress skipped it, and it was deleted rather than left to be built on
 - terminal colour-capability detection. It belongs *upstream* of `to_colour`, choosing which colour is produced — not in a per-cell conversion that runs tens of thousands of times a frame
 
 The render path is built: `App::update` ticks the clock, advances whatever is moving, samples (only when its `SampleParams` changed) and shades; `App::draw` blits the finished grid and nothing else. Glyph and half-block rendering, nine palettes, both kernels, keyboard interaction and all three motion modes exist.
@@ -118,6 +121,26 @@ The dive also stops at `Precision::Marginal` rather than at the hard clamp. Reac
 Half-block landed in increment 4 and **the aspect-absorption claim held**: `switching_mode_keeps_the_same_view` zooms and pans, presses `m`, and asserts the centre, width and height of the plane region are unchanged while the sample lattice doubles and the aspect halves. Nothing in core needed touching — the mode is a `CellMode` variant, a subdivision pair, and a blit.
 
 Two things that came out of building it. Half-block mode gets **no render snapshot**: `TestBackend` captures symbols only and every cell in that mode is `▀`, so a snapshot would be a uniform rectangle that passes whatever the picture does — coverage in appearance only. The packing is asserted directly instead. And a `Paragraph` overlay **recolours** a row without overwriting the glyphs under it, so the status line needed a `Clear` first or the fractal showed through to the right of the text.
+
+**A formula and a plane are independent choices, and conflating them cost four Julia families.** `Kernel` is `Parameter(FormulaKind)` or `Julia(FormulaKind, Complex)` — five formulas times two planes, ten fractals from two small enums. It was six flat variants with `Julia` hardcoded to the quadratic, which meant the burning ship, tricorn, celtic and cubic had no Julia sets at all and no reason for it: the two planes are two readings of one iteration (`z₀ = 0, c = p` against `z₀ = p, c` fixed), not two different fractals. `Parameter<F>` and `Julia<F>` are generic over the formula, so a new formula needs *no* new fractal type. `Mandelbrot` stays its own type because it alone carries the exact cardioid shortcut, which is a fact about the quadratic's parameter plane and wrong for the other four.
+
+`f` cycles formula and keeps the plane; `d` (the *dynamical* plane, which is its proper name) flips plane and keeps the formula. Not `j` — that is pan-down, and hjkl outranks a mnemonic. Switching formula on a Julia **re-aims** at the new formula's own orbit rather than carrying `c` across, because a `c` measured for one formula is an arbitrary parameter of another and usually outside its locus.
+
+**The parameter orbit is the default drive, and the dive is the keypress.** Both move the geometry; they fail differently. The orbit walks a measured loop, so it cannot run out of precision, never re-aims, and runs indefinitely. The dive reaches `f64`'s limit in about two minutes, must re-target every few decades or it lands in solid interior, and its target rule is known to pick badly at depth — `boundary_target` wants a sample adjacent to an *interior* one, but "interior" only means "did not escape within the current limit", so at depth it degenerates into a highest-iteration-count search. Review measured it collapsing below `MIN_INTERESTING` on the burning ship at 50×25 and on the mandelbrot at 80×40; the existing dive test passes because 50×25 mandelbrot happens to be a lucky trajectory. **That is not fixed** — see [Not yet designed](#not-yet-designed).
+
+**The orbit path is measured data in core, not a formula in the frontend.** `Formula::JULIA_ORBIT` is a baked closed loop per formula, interpolated by `orbit::julia_parameter`. What it replaced was `c = 0.7·(cos θ, sin θ)` in `app.rs` — a circle about the origin, over half of which lies *outside* the connectedness locus, where the Julia set is Cantor dust and renders as a smooth featureless oval. Measured: **13 of 24 sampled phases at the dust baseline.** A circle is the wrong shape for all five, because none of these sets is a disc.
+
+Three things about how the loops were chosen, because each was a wrong turn first:
+
+- **Interior fraction is the wrong metric.** It rates a deep-interior `c` as excellent, but a fat Julia blob has nothing to shade — the burning ship went flat in 35 of 48 frames when pulled inward. Rendered *structure* is the metric: the fraction of adjacent samples in different ramp bands. Dust scores 0.0595, Douady's rabbit 0.1292.
+- **Hug the boundary, do not pull inside it.** That is the opposite of the initial guess, and the sweep is unambiguous.
+- **A polygon cannot track a fractal boundary from inside.** Subdividing chords that leave the locus does not converge; being slightly outside looks fine (a near-dendrite), only far outside looks like dust. So the acceptance test is "no vertex escapes within 1,500 iterations", not provable membership — three loci contain every vertex outright, and the burning ship and celtic each have two vertices escaping at 3,705 and 5,349, far beyond any limit the renderer reaches.
+
+**A real `c` collapses three Julia families into one, and it is not a bug.** With `c` real, the burning ship's `2|zr||zi|` and the tricorn's `-2·zr·zi` have the same *magnitude* as the quadratic's `2·zr·zi`, while `zr² - zi²` depends only on the squares — so `|zr|` and `|zi|` evolve identically, escape depends only on magnitude, and all three render the same picture. Measured: zero disagreements over 4,000 seeds at each of four real `c`. The celtic escapes it because its `abs` is on the real part. **This is why every baked orbit is rotated 45° off the real axis:** turn zero is where `julia_of` lands, and three identical fractals there would look like the formula switch was broken. `no_orbit_starts_on_the_real_axis` guards it.
+
+**Never poll for input with `checked_duration_since`.** `App::run`'s drain loop was `while let Some(remaining) = next_frame.checked_duration_since(Instant::now())`. On any frame that overran the budget the deadline is already past, so that yields `None` and skips the body — which holds the *only* `event::poll` in the program. Every overrunning frame handled no input, and under sustained overrun the renderer went permanently deaf: raw mode clears ISIG, so Ctrl-C is just a key event and died with the rest. Reproduced on a pty at 300×100 with 3× supersampling on the default dive — 40s in, `q` was ignored for the 15s the harness waited, the alternate screen was never left, and it took a SIGKILL, which skips the restore hook and leaves the user's shell in raw mode. Two presses of `s` from launch got you there. It is `saturating_duration_since` now, so an overrunning frame still drains with a zero timeout (`crossterm-0.29.0 src/event.rs:185-187`).
+
+**Snapshots pin the rendering, so they pin their own inputs.** `render_tests.rs` calls `App::pin_for_snapshot` to fix the kernel, drive and cycling rather than inheriting `App::new`'s defaults. Otherwise moving the launch view rewrites all three snapshots and a real geometry regression hides in the noise — which is exactly what happened when the default drive became the orbit. It also makes their determinism real rather than incidental: `update` takes `Instant::now()`, and they were only stable because `Clock`'s first tick returns zero.
 
 **A formula's degree is load-bearing, not decoration.** The continuous escape count divides by `ln(degree)`, and that is exactly what makes it invariant under one more iteration: the count rises by one while `ln|z|` is multiplied by the degree, and the two cancel. Hardcode 2 for a cubic and they do not — the value jumps by 0.585 at every band boundary, which renders as banding and looks nothing like a wrong constant. `the_smooth_count_is_invariant_under_one_more_iteration` checks both directions, including that the wrong degree genuinely breaks it.
 
@@ -286,7 +309,7 @@ A tension to expect: a headless exporter that wants the *real* palette needs `fr
 - **Keep `main.rs` thin.** It wires arguments to library calls and prints errors. `main` cannot be tested without spawning the binary, so logic that lands there stops being covered. `cli_args.rs` is the pattern: the clap tree plus the pure functions it feeds, with their own tests.
 - **Keep a clap doc comment to one line.** The exact rule (`clap_derive-4.6.4 src/utils/doc_comments.rs:123-135`): with a blank line in the comment, the first *paragraph* is the short help and the *whole* comment is the long help; with no blank line, every line is merged into one and there is no long help. So a multi-line doc comment either prints in full under `--help` or collapses into a run-on short help. Put rationale in `//` comments. `README.md`'s Usage and Keyboard shortcuts blocks are what these must agree with.
 - **Check `KeyEventKind`** — and know that the check is **inert today**, which is the interesting part. A key-up must not re-trigger what its key-down ran. On Unix the non-Press kinds arrive only if the app pushes `REPORT_EVENT_TYPES` (`crossterm-0.29.0 src/event.rs:296-298`), which `ratatui::try_init` does not (`ratatui-0.30.2 src/init.rs:397-403`); the other source is a Windows console (`crossterm-0.29.0 src/event/sys/windows/parse.rs:226,289`), which is out of scope. It stays because it stops being inert the moment we push `REPORT_EVENT_TYPES` to get unambiguous modifier chords — which a pan/zoom UI will want — and `release_and_repeat_events_are_ignored` is what documents that intent. This receipt has been wrong twice — first blaming kitty, then Windows — so check it before citing it.
-- **`CARGO_PKG_*` resolves per compiling package.** User-facing name and version therefore belong in the binary; a library reading the same macro reports itself. The splash currently prints the tui crate's version, which is correct only while the workspace shares one — anything user-facing that outlives the placeholder should take the binary's.
+- **`CARGO_PKG_*` resolves per compiling package.** User-facing name and version therefore belong in the binary; a library reading the same macro reports itself.
 - **No re-export shims when moving code.** Rewrite the imports at every call site. A shim means nothing forces callers to acknowledge the new layout, so the old path lingers and the boundary never moves.
 - **A comment claiming behaviour of code outside this repo must carry its receipt.** Claims about our own code are cheap to check and reviewers do check them; boundary claims get reasoned from plausibility and then read as fact forever. Cite it inline (as above), name the test that pins it, or phrase it as an assumption. In review a receipt-less boundary claim is **unverified by default** — ask where the receipt is.
 
@@ -312,7 +335,7 @@ Measured with `frascii --headless` on a Ryzen 9 7940HS (release, 20,000 samples/
 | 1e6 magnification | 2,691 | 5.27ms | 190 |
 | 1e10 magnification | 4,286 | 6.59ms | 152 |
 
-So the 30fps budget is met with roughly 5× headroom in the worst case, on the CPU, with no SIMD and no GPU. That answers the question the staging was ordered to answer first, and it is why the `Sampler` trait has exactly one implementation.
+So the 30fps budget is met with roughly 5× headroom in the worst case, on the CPU, with no SIMD and no GPU. That answers the question the staging was ordered to answer first, and it is why `sample_into` is a free function with no backend trait behind it.
 
 **If that headroom is ever spent, the order is not the obvious one.** Two corrections worth keeping, both from review:
 
@@ -327,9 +350,9 @@ And one distinction to keep straight: **progressive refinement and dynamic resol
 
 Unit tests are co-located (`#[cfg(test)]`). Use red–green TDD: failing test first. Bug fixes need a regression test too — if the fix seems to live somewhere untestable, push the logic into a library crate rather than skipping the test.
 
-`default-members` is `crates/*`, which is what makes a bare `cargo run` start the TUI — but it also means **a bare `cargo test` runs the product crates only and skips xtask's own tests**, the CI-matrix guard among them. Every verify lane passes `--workspace`, so `cargo verify` covers them; a bare `cargo test` is 29 tests where the lane is 41.
+`default-members` is `crates/*`, which is what makes a bare `cargo run` start the TUI — but it also means **a bare `cargo test` runs the product crates only and skips xtask's own tests**, the CI-matrix guard among them. Every verify lane passes `--workspace`, so `cargo verify` covers them; a bare `cargo test` skips xtask's 15.
 
-**Tests must not write anywhere outside a `tempfile::TempDir`** (add the dependency when one first needs it). *Reading* the checkout is fine and two tests do it, both via `include_str!` so the read happens at compile time: the CI-matrix guard and `this_module_stays_free_of_ratatui`. A path-shaped *value* that is never touched on disk is fine too — `cli_args.rs` and `runner.rs` each assert on one — but never open a hardcoded path.
+**Tests must not write anywhere outside a `tempfile::TempDir`** (add the dependency when one first needs it). *Reading* the checkout is fine and three tests do it, all via `include_str!` so the read happens at compile time: the CI-matrix guard, `this_module_stays_free_of_ratatui`, and the headless boundary scan. A path-shaped *value* that is never touched on disk is fine too — `cli_args.rs` and `runner.rs` each assert on one — but never open a hardcoded path.
 
 ### Render snapshots
 

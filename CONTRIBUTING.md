@@ -24,7 +24,7 @@ One optional extra: `cargo install cargo-insta`, needed only to accept or review
 cargo verify                          # every lane: fmt, clippy, build, test, doc
 cargo verify --only clippy            # one lane
 cargo verify --list                   # the lane / exit-code table
-cargo test -p frascii-tui smooth      # one crate and a filter — plain cargo
+cargo test -p frascii-core smooth      # one crate and a filter — plain cargo
 ```
 
 `cargo verify`'s default is the whole set on purpose: it matches CI's matrix, so a green sweep means a green PR. There are no tiers and no `-p` wrapper — a subset is `--only`, and cargo already tests one crate perfectly well.
@@ -47,7 +47,7 @@ Every lane runs even after an earlier one fails. Full output goes to `target/ver
 
 ## Things worth knowing before your first change
 
-- **Which crate does this belong in?** The test to apply is: *would a second frontend need this unchanged?* If yes it belongs in `frascii-core` — which is why that crate has no dependencies and allows nothing presentational or host-bound. The kernels, the plane↔sample geometry and the sampler are all core's; the glyphs and colours are the frontend's. Rendering lives with the terminal frontend for now, and `render.rs` stays ratatui-free so it can be extracted later — a test enforces that, so don't import ratatui into it for convenience. [CLAUDE.md](CLAUDE.md#architecture) has the full rules, and each `Cargo.toml` says what must never appear in its `[dependencies]`.
+- **Which crate does this belong in?** The test to apply is: *would a second frontend need this unchanged?* If yes it belongs in `frascii-core` — which is why that crate's only dependency is `rayon` and allows nothing presentational or host-bound. The kernels, the plane↔sample geometry and the sampler are all core's; the glyphs and colours are the frontend's. Rendering lives with the terminal frontend for now, and `render.rs` stays ratatui-free so it can be extracted later — a test enforces that, so don't import ratatui into it for convenience. [CLAUDE.md](CLAUDE.md#architecture) has the full rules, and each `Cargo.toml` says what must never appear in its `[dependencies]`.
 - **Never `println!` in the TUI.** The alternate screen is live; anything written to stdout or stderr is painted over the render. Use `tracing` and `--log`.
 - **Read snapshot diffs.** Render snapshots fail only when rendering genuinely changed. `cargo insta review` to accept; never blind-accept, and never delete a snapshot file to make a test pass — re-point it at the new UI instead.
 - **Every public item needs a doc comment.** `missing_docs` is warn-level workspace-wide and CI denies warnings. The `doc` lane also catches broken intra-doc links, which `cargo build` never sees.
