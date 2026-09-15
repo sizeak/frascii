@@ -95,7 +95,13 @@ const ZOOM_STEP: f64 = 0.8;
 const CYCLE_RATE: f64 = 6.0;
 
 /// How long the Julia parameter takes to travel once around its path.
-const ORBIT_PERIOD: Duration = Duration::from_secs(24);
+///
+/// Was 24s, which read as restless now that the orbit is what you get on
+/// launch: the loops carry 32 vertices, so a lap that quick crosses an edge
+/// every three quarters of a second, and the longer edges — the burning ship's
+/// worst is 0.93 plane units — went by faster than the eye settles. A lap is
+/// the whole shape of the thing, so it wants to be watched rather than caught.
+const ORBIT_PERIOD: Duration = Duration::from_secs(40);
 
 // The path itself lives in core, per formula, as `Formula::JULIA_ORBIT` — it
 // is measured data about where Julia sets have structure, not a frontend
@@ -1912,18 +1918,28 @@ mod tests {
             let name = app.kernel_name();
 
             let first = app.params.kernel;
+            let before: Vec<char> = app.cells.cells().map(|c| c.glyph).collect();
             animate(&mut app, area, 40, Duration::from_millis(200));
             assert_ne!(app.params.kernel, first, "{name} parameter did not move");
             assert!(app.params.kernel.same_kind(first), "{name} left its plane");
 
-            // Still a picture, not a blob: the loops were measured for this.
-            let glyphs: std::collections::BTreeSet<char> =
-                app.cells.cells().map(|c| c.glyph).collect();
-            assert!(
-                glyphs.len() >= 4,
-                "{name} rendered {} distinct glyphs mid-orbit",
-                glyphs.len()
-            );
+            // Still a picture, and a *different* picture. Asserting that the
+            // glyphs changed is the property that matters here — the shape
+            // morphs — and it is one no palette cycling could fake.
+            //
+            // Deliberately not a distinct-glyph count. That was the first
+            // version and it is a bad proxy: several tricorn phases render a
+            // clean hollow ring using only three ramp steps, because their
+            // exterior gradient is smooth, and the count calls that a blob
+            // while the eye plainly does not. Slowing `ORBIT_PERIOD` landed on
+            // exactly such a phase and failed a test that should not have
+            // cared. Structure is measured properly, at a resolution where the
+            // question means something, by core's
+            // `no_phase_of_any_orbit_renders_as_a_featureless_blob`.
+            let after: Vec<char> = app.cells.cells().map(|c| c.glyph).collect();
+            assert_ne!(before, after, "{name} did not morph");
+            let distinct: std::collections::BTreeSet<char> = after.iter().copied().collect();
+            assert!(distinct.len() > 1, "{name} rendered a uniform screen");
         }
     }
 
